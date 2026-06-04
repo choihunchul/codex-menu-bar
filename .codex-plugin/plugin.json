@@ -1,0 +1,43 @@
+{
+  "name": "codex-menu-bar",
+  "version": "0.1.0",
+  "description": "Menu bar status bridge for Codex companion app.",
+  "author": {
+    "name": "hunchulchoi",
+    "email": "support@example.com",
+    "url": "https://example.com/"
+  },
+  "homepage": "https://example.com/codex-menu-bar",
+  "repository": "https://example.com/codex-menu-bar",
+  "license": "MIT",
+  "keywords": [
+    "codex",
+    "menubar",
+    "status"
+  ],
+  "skills": "./skills/",
+  "mcpServers": "./.mcp.json",
+  "interface": {
+    "displayName": "Codex Menu Bar",
+    "shortDescription": "Update a local Codex menu bar status indicator.",
+    "longDescription": "Codex Menu Bar provides a local MCP status bridge for a macOS menu bar companion app. The companion app watches a local status file and shows running, idle, waiting, message, and error states while Codex works.",
+    "developerName": "hunchulchoi",
+    "category": "Productivity",
+    "capabilities": [
+      "Interactive",
+      "Write"
+    ],
+    "websiteURL": "https://example.com/codex-menu-bar",
+    "privacyPolicyURL": "https://example.com/privacy",
+    "termsOfServiceURL": "https://example.com/terms",
+    "defaultPrompt": [
+      "Show Codex work status in the menu bar",
+      "Set my menu bar status to running",
+      "Mark the Codex menu bar status idle"
+    ],
+    "brandColor": "#111827",
+    "composerIcon": "./assets/icon.svg",
+    "logo": "./assets/icon.svg",
+    "screenshots": []
+  }
+}

@@ -1,0 +1,3 @@
+[mcp_servers.codex-menu-bar]
+args = ["./scripts/codex-status-mcp.mjs"]
+command = "node"

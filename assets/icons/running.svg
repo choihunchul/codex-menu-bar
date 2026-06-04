@@ -1,0 +1,34 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" width="22" height="22" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+  <style>
+    /* 위아래로 은은하게 움직이는 효과 */
+    @keyframes float {
+      0% { transform: translateY(0px); }
+      50% { transform: translateY(-1.2px); }
+      100% { transform: translateY(0px); }
+    }
+    
+    /* 하단 불빛이 왼쪽에서 오른쪽으로 순서대로 깜빡이는 효과 */
+    @keyframes blink {
+      0%, 100% { opacity: 0.3; }
+      50% { opacity: 1; }
+    }
+
+    .ufo-group {
+      animation: float 3s ease-in-out infinite;
+      transform-origin: center;
+    }
+
+    .light-left { animation: blink 1.5s infinite 0s; }
+    .light-center { animation: blink 1.5s infinite 0.5s; }
+    .light-right { animation: blink 1.5s infinite 1s; }
+  </style>
+
+  <g class="ufo-group">
+    <path d="M 2 13 C 2 11, 7 10, 7 10 C 7 5, 17 5, 17 10 C 17 10, 22 11, 22 13 C 22 16.5, 2 16.5, 2 13 Z" />
+    <path d="M 7 10 C 9 11.5, 15 11.5, 17 10" />
+    
+    <circle class="light-left" cx="7" cy="14" r="1" fill="currentColor" stroke="none" />
+    <circle class="light-center" cx="12" cy="14.5" r="1" fill="currentColor" stroke="none" />
+    <circle class="light-right" cx="17" cy="14" r="1" fill="currentColor" stroke="none" />
+  </g>
+</svg>
