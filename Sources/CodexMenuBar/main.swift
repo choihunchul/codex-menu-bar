@@ -619,7 +619,8 @@ private final class UsageSummaryCardView: NSView {
     // MARK: - Tab state
     private enum Tab: Int {
         case codex = 0
-        case antigravity = 1
+        case cursor = 1
+        case antigravity = 2
     }
     private var selectedTab: Tab = .codex
 
@@ -639,6 +640,16 @@ private final class UsageSummaryCardView: NSView {
     private let weeklyLimitView = LimitUsageBarView()
     private let todayUsageView = UsageMetricBlockView()
     private let weekUsageView = UsageMetricBlockView()
+
+    // MARK: - Cursor panel
+    private let cursorPanel = NSView(frame: .zero)
+    private let cursorTitleLabel = UsageSummaryCardView.makeLabel(font: .systemFont(ofSize: 15, weight: .semibold), color: .labelColor)
+    private let cursorStatusLabel = UsageSummaryCardView.makeLabel(font: .systemFont(ofSize: 13, weight: .medium), color: .labelColor)
+    private let cursorLastActivityLabel = UsageSummaryCardView.makeLabel(font: .systemFont(ofSize: 13, weight: .medium), color: .secondaryLabelColor)
+    private let cursorAPILimitView = LimitUsageBarView()
+    private let cursorTotalLimitView = LimitUsageBarView()
+    private let cursorSpendLabel = UsageSummaryCardView.makeLabel(font: .systemFont(ofSize: 13, weight: .regular), color: .labelColor)
+    private let cursorTokensLabel = UsageSummaryCardView.makeLabel(font: .systemFont(ofSize: 13, weight: .regular), color: .labelColor)
 
     // MARK: - Antigravity panel
     private let agPanel = NSView(frame: .zero)
@@ -661,9 +672,10 @@ private final class UsageSummaryCardView: NSView {
         surfaceView.layer?.backgroundColor = NSColor.controlBackgroundColor.withAlphaComponent(0.96).cgColor
 
         // Tab control
-        tabControl.segmentCount = 2
+        tabControl.segmentCount = 3
         tabControl.setLabel("Codex", forSegment: 0)
-        tabControl.setLabel("AGY", forSegment: 1)
+        tabControl.setLabel("Cursor", forSegment: 1)
+        tabControl.setLabel("AGY", forSegment: 2)
         tabControl.selectedSegment = 0
         tabControl.segmentStyle = .rounded
         tabControl.controlSize = .small
@@ -688,6 +700,22 @@ private final class UsageSummaryCardView: NSView {
         codexPanel.addSubview(todayUsageView)
         codexPanel.addSubview(weekUsageView)
 
+        // Cursor panel setup
+        cursorTitleLabel.stringValue = "Cursor Usage"
+        cursorStatusLabel.stringValue = "Status: idle"
+        cursorLastActivityLabel.stringValue = "Last activity: -"
+        cursorSpendLabel.stringValue = "Spend: -"
+        cursorTokensLabel.stringValue = "Tokens: -"
+
+        cursorPanel.addSubview(cursorTitleLabel)
+        cursorPanel.addSubview(cursorStatusLabel)
+        cursorPanel.addSubview(cursorLastActivityLabel)
+        cursorPanel.addSubview(cursorSpendLabel)
+        cursorPanel.addSubview(cursorTokensLabel)
+        cursorPanel.addSubview(cursorAPILimitView)
+        cursorPanel.addSubview(cursorTotalLimitView)
+        cursorPanel.isHidden = true
+
         // AGY panel setup
         agTitleLabel.stringValue = "Antigravity"
         agStatusLabel.stringValue = "Status: idle"
@@ -706,6 +734,7 @@ private final class UsageSummaryCardView: NSView {
         addSubview(surfaceView)
         surfaceView.addSubview(tabControl)
         surfaceView.addSubview(codexPanel)
+        surfaceView.addSubview(cursorPanel)
         surfaceView.addSubview(agPanel)
     }
 
@@ -716,6 +745,7 @@ private final class UsageSummaryCardView: NSView {
     @objc private func tabChanged(_ sender: NSSegmentedControl) {
         selectedTab = Tab(rawValue: sender.selectedSegment) ?? .codex
         codexPanel.isHidden = selectedTab != .codex
+        cursorPanel.isHidden = selectedTab != .cursor
         agPanel.isHidden = selectedTab != .antigravity
         needsLayout = true
     }
@@ -844,6 +874,71 @@ private final class UsageSummaryCardView: NSView {
         needsDisplay = true
     }
 
+    // MARK: - Cursor update
+
+    func updateCursor(
+        snapshot: CursorActivitySnapshot,
+        limitState: CursorLimitState,
+        activeWindowSeconds: TimeInterval,
+        now: Date = Date()
+    ) {
+        let isActive = snapshot.isActive(activeWindowSeconds: activeWindowSeconds, now: now)
+        let statusText: String
+        let statusColor: NSColor
+        if isActive {
+            statusText = "● Running"
+            statusColor = .systemCyan
+        } else {
+            statusText = "○ Idle"
+            statusColor = .secondaryLabelColor
+        }
+        cursorTitleLabel.stringValue = "Cursor Usage"
+        cursorStatusLabel.stringValue = "Status: \(statusText)"
+        cursorStatusLabel.textColor = statusColor
+
+        let latestActivity = [snapshot.lastUserActivityDate, snapshot.lastAgentActivityDate].compactMap { $0 }.max()
+        if let lastDate = latestActivity {
+            let seconds = max(0, Int(now.timeIntervalSince(lastDate)))
+            cursorLastActivityLabel.stringValue = "Last activity: \(formatActivityAge(seconds))"
+        } else {
+            cursorLastActivityLabel.stringValue = "Last activity: -"
+        }
+
+        if limitState.source == "live" {
+            let apiPercent = limitState.apiPercentUsed ?? 0.0
+            let totalPercent = limitState.totalPercentUsed ?? 0.0
+            
+            cursorAPILimitView.updateRaw(
+                title: String(format: "API Limit: %.1f%% used", apiPercent),
+                usedPercent: apiPercent,
+                color: apiPercent >= 80.0 ? .systemRed : (apiPercent >= 50.0 ? .systemOrange : .systemCyan)
+            )
+            
+            cursorTotalLimitView.updateRaw(
+                title: String(format: "Total Limit: %.1f%% used", totalPercent),
+                usedPercent: totalPercent,
+                color: totalPercent >= 80.0 ? .systemRed : (totalPercent >= 50.0 ? .systemOrange : .systemGreen)
+            )
+            
+            let spend = limitState.totalSpendUSD.map { String(format: "$%.2f", $0) } ?? "-"
+            let limit = limitState.limitUSD.map { String(format: "$%.2f", $0) } ?? "-"
+            let included = limitState.includedSpendUSD.map { String(format: "$%.2f", $0) } ?? "-"
+            cursorSpendLabel.stringValue = "Spend: \(spend) / \(limit) (Included: \(included))"
+            
+            let tokens = limitState.totalTokens.map { formatTokenCount($0) } ?? "-"
+            let requests = limitState.totalRequests.map { "\($0) reqs" } ?? "-"
+            cursorTokensLabel.stringValue = "Tokens: \(tokens) (\(requests))"
+        } else {
+            cursorAPILimitView.updateRaw(title: "API Limit: -", usedPercent: 0.0, color: .secondaryLabelColor)
+            cursorTotalLimitView.updateRaw(title: "Total Limit: -", usedPercent: 0.0, color: .secondaryLabelColor)
+            cursorSpendLabel.stringValue = "Spend: -"
+            cursorTokensLabel.stringValue = "Tokens: -"
+        }
+        
+        needsLayout = true
+        needsDisplay = true
+    }
+
     private func formatActivityAge(_ seconds: Int) -> String {
         if seconds < 60 { return "\(seconds)s ago" }
         let minutes = seconds / 60
@@ -877,9 +972,11 @@ private final class UsageSummaryCardView: NSView {
         let panelHeight = panelTop
         let panelFrame = NSRect(x: 0, y: 0, width: surfaceView.bounds.width, height: panelHeight)
         codexPanel.frame = panelFrame
+        cursorPanel.frame = panelFrame
         agPanel.frame = panelFrame
 
         layoutCodexPanel(inset: inset, panelHeight: panelHeight)
+        layoutCursorPanel(inset: inset, panelHeight: panelHeight)
         layoutAGPanel(inset: inset, panelHeight: panelHeight)
     }
 
@@ -913,6 +1010,25 @@ private final class UsageSummaryCardView: NSView {
         todayUsageView.frame = NSRect(x: rightX, y: rightTop - 70, width: rightWidth, height: 64)
         rightTop -= 84
         weekUsageView.frame = NSRect(x: rightX, y: rightTop - 70, width: rightWidth, height: 64)
+    }
+
+    private func layoutCursorPanel(inset: CGFloat, panelHeight: CGFloat) {
+        let contentWidth = cursorPanel.bounds.width - inset * 2
+        var top = panelHeight - 4
+
+        cursorTitleLabel.frame = NSRect(x: inset, y: top - 20, width: contentWidth, height: 20)
+        top -= 28
+        cursorStatusLabel.frame = NSRect(x: inset, y: top - 16, width: contentWidth, height: 16)
+        top -= 22
+        cursorLastActivityLabel.frame = NSRect(x: inset, y: top - 16, width: contentWidth, height: 16)
+        top -= 22
+        cursorSpendLabel.frame = NSRect(x: inset, y: top - 16, width: contentWidth, height: 16)
+        top -= 22
+        cursorTokensLabel.frame = NSRect(x: inset, y: top - 16, width: contentWidth, height: 16)
+        top -= 22
+        cursorAPILimitView.frame = NSRect(x: inset, y: top - 22, width: contentWidth, height: 22)
+        top -= 28
+        cursorTotalLimitView.frame = NSRect(x: inset, y: top - 22, width: contentWidth, height: 22)
     }
 
     private func layoutAGPanel(inset: CGFloat, panelHeight: CGFloat) {
@@ -2196,6 +2312,13 @@ final class CodexMenuBarApp: NSObject, NSApplicationDelegate {
 
         usageSummaryView.updateAntigravity(
             snapshot: currentAntigravitySnapshot,
+            activeWindowSeconds: settings.activeWindowSeconds,
+            now: now
+        )
+
+        usageSummaryView.updateCursor(
+            snapshot: currentCursorSnapshot,
+            limitState: currentCursorLimitState,
             activeWindowSeconds: settings.activeWindowSeconds,
             now: now
         )
