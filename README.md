@@ -31,6 +31,8 @@ The macOS menu bar app supports multi-agent and multi-editor status monitoring w
   - **Awaiting Approval**: Orange blinking dot.
   - **Completed/Done**: Solid Green dot.
   - **Error/Failed**: Solid Red dot.
+* **Dynamic UI Adaptability**: If Cursor or Antigravity monitoring is disabled in settings, their respective tabs and menu items (status lines and separators) are automatically hidden. If only one tab is active (e.g. only Codex), the tab selector bar is hidden entirely to maximize space and provide a cleaner interface.
+
 
 ## Privacy & Local-First Philosophy
 
