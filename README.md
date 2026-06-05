@@ -2,6 +2,8 @@
 
 Codex Menu Bar is a local Codex plugin plus a macOS menu bar companion app.
 
+![Codex Menu Bar Screenshot](assets/screenshot.png)
+
 The plugin exposes an MCP status bridge. The companion app watches `~/.codex-menu-bar/status.json` and shows:
 
 - `Codex | / - \` while running
