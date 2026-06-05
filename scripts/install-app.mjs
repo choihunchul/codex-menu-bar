@@ -33,7 +33,7 @@ function run(command, args, options = {}) {
 }
 
 async function main() {
-  const version = process.argv[2] || "1.0.5";
+  const version = process.argv[2] || "1.0.6";
   const buildDate = new Date().toISOString().slice(0, 10);
   console.log(`Building version ${version} with build date ${buildDate}...`);
   run("swift", ["build", "-c", "release"], { cwd: projectRoot });
