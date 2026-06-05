@@ -84,7 +84,8 @@ final class CodexMenuBarIconRenderer {
         fiveHourUsagePercent: Double?,
         weeklyUsagePercent: Double?,
         agActive: Bool = false,
-        agStatus: String? = nil
+        agStatus: String? = nil,
+        hasUpdate: Bool = false
     ) -> NSImage {
         let kind = codexMenuBarIconKind(status: status, isRecentlyCompleted: isRecentlyCompleted)
         let color = codexMenuBarIconColor(status: status, isRecentlyCompleted: isRecentlyCompleted)
@@ -100,21 +101,22 @@ final class CodexMenuBarIconRenderer {
         
         let hasAgDot = (effectiveAgStatus != nil)
         let image = NSImage(size: Self.size)
-        image.isTemplate = !hasAgDot
+        image.isTemplate = !hasAgDot && !hasUpdate
         image.lockFocus()
         defer { image.unlockFocus() }
 
         NSGraphicsContext.current?.shouldAntialias = true
         draw(
             kind: kind,
-            color: hasAgDot ? NSColor.labelColor : color,
+            color: (hasAgDot || hasUpdate) ? NSColor.labelColor : color,
             frameIndex: frameIndex,
             fiveHourUsagePercent: fiveHourUsagePercent,
             weeklyUsagePercent: weeklyUsagePercent,
             showTopRightSparkle: codexMenuBarTopRightSparkleShouldBlink(
                 status: status,
                 isRecentlyCompleted: isRecentlyCompleted
-            )
+            ),
+            hasUpdate: hasUpdate
         )
 
         if let effectiveAgStatus {
@@ -173,7 +175,8 @@ final class CodexMenuBarIconRenderer {
         frameIndex: Int,
         fiveHourUsagePercent: Double?,
         weeklyUsagePercent: Double?,
-        showTopRightSparkle: Bool
+        showTopRightSparkle: Bool,
+        hasUpdate: Bool
     ) {
         let contextRect = CGRect(origin: .zero, size: Self.size)
         let viewBoxWidth: CGFloat = 24
@@ -209,7 +212,29 @@ final class CodexMenuBarIconRenderer {
         if showTopRightSparkle {
             drawCompleteSparkle(color: color, frameIndex: frameIndex)
         }
+
+        if hasUpdate {
+            drawExclamationMark()
+        }
+
         NSGraphicsContext.restoreGraphicsState()
+    }
+
+    private func drawExclamationMark() {
+        let markColor = NSColor.systemOrange
+        markColor.setStroke()
+        
+        let path = NSBezierPath()
+        path.move(to: CGPoint(x: 3.5, y: 3.0))
+        path.line(to: CGPoint(x: 3.5, y: 6.5))
+        path.lineWidth = 1.8
+        path.lineCapStyle = .round
+        path.stroke()
+        
+        let dotRect = CGRect(x: 2.6, y: 8.0, width: 1.8, height: 1.8)
+        let dotPath = NSBezierPath(ovalIn: dotRect)
+        markColor.setFill()
+        dotPath.fill()
     }
 
     private func drawBaseSpaceship(

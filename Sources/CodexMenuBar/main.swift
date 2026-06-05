@@ -2013,7 +2013,8 @@ final class CodexMenuBarApp: NSObject, NSApplicationDelegate {
             fiveHourUsagePercent: currentLimitState.primary?.usedPercent,
             weeklyUsagePercent: currentLimitState.secondary?.usedPercent,
             agActive: agActive,
-            agStatus: agStatus
+            agStatus: agStatus,
+            hasUpdate: availableUpdateVersion != nil
         )
         if let button = statusItem.button {
             button.image = iconImage
@@ -2612,6 +2613,7 @@ final class CodexMenuBarApp: NSObject, NSApplicationDelegate {
                         self.availableUpdateVersion = release.tag_name
                         self.availableUpdateURL = downloadURL
                         self.updateMenuItemTitle("Update to \(release.tag_name) (Available)")
+                        self.updateMenuBarIcon()
                         
                         if isUserInitiated {
                             self.promptToUpdate(version: release.tag_name, url: downloadURL)
@@ -2620,7 +2622,10 @@ final class CodexMenuBarApp: NSObject, NSApplicationDelegate {
                     }
                 }
 
+                self.availableUpdateVersion = nil
+                self.availableUpdateURL = nil
                 self.updateMenuItemTitle("Check for Updates...")
+                self.updateMenuBarIcon()
                 if isUserInitiated {
                     self.showAlert(title: "Up to Date", message: "You are running the latest version (\(currentVersion)).")
                 }
