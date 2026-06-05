@@ -1611,12 +1611,17 @@ final class CodexMenuBarApp: NSObject, NSApplicationDelegate {
     private func configureMenu() {
         let menu = NSMenu()
         menu.autoenablesItems = false
-        menu.addItem(NSMenuItem(title: "Codex Menu Bar", action: nil, keyEquivalent: ""))          // 0
+        
+        let headerItem = NSMenuItem(title: "Codex Menu Bar", action: #selector(openGitHub), keyEquivalent: "")
+        headerItem.isEnabled = true
+        menu.addItem(headerItem)                                                                     // 0
         menu.addItem(NSMenuItem.separator())                                                         // 1
+        
         let summaryItem = NSMenuItem()
         summaryItem.isEnabled = false
         summaryItem.view = usageSummaryView
         menu.addItem(summaryItem)                                                                    // 2
+        
         menu.addItem(NSMenuItem(title: "Codex Status: -", action: nil, keyEquivalent: ""))         // 3
         menu.addItem(NSMenuItem(title: "Detail: -", action: nil, keyEquivalent: ""))               // 4
         menu.addItem(NSMenuItem(title: "Source: -", action: nil, keyEquivalent: ""))               // 5
@@ -1631,13 +1636,15 @@ final class CodexMenuBarApp: NSObject, NSApplicationDelegate {
         menu.addItem(NSMenuItem(title: "AGY Activity: -", action: nil, keyEquivalent: ""))         // 14
         menu.addItem(NSMenuItem(title: "AGY Conversations: -", action: nil, keyEquivalent: ""))    // 15
         menu.addItem(NSMenuItem.separator())                                                         // 16
-        menu.addItem(NSMenuItem(title: "Settings...", action: #selector(openSettings), keyEquivalent: ","))         // 17
-        menu.addItem(NSMenuItem(title: "Open Status File", action: #selector(openStatusFile), keyEquivalent: "o")) // 18
-        menu.addItem(NSMenuItem(title: "Reveal Status Folder", action: #selector(revealStatusFolder), keyEquivalent: "r")) // 19
-        menu.addItem(NSMenuItem.separator())                                                         // 20
-        menu.addItem(NSMenuItem(title: "Check for Updates...", action: #selector(checkForUpdatesManually), keyEquivalent: "")) // 21
-        menu.addItem(NSMenuItem(title: "Restart", action: #selector(restart), keyEquivalent: "R")) // 22
-        menu.addItem(NSMenuItem(title: "Quit", action: #selector(quit), keyEquivalent: "q"))       // 23
+        
+        menu.addItem(NSMenuItem(title: "GitHub Repository...", action: #selector(openGitHub), keyEquivalent: "")) // 17
+        menu.addItem(NSMenuItem(title: "Settings...", action: #selector(openSettings), keyEquivalent: ","))         // 18
+        menu.addItem(NSMenuItem(title: "Open Status File", action: #selector(openStatusFile), keyEquivalent: "o")) // 19
+        menu.addItem(NSMenuItem(title: "Reveal Status Folder", action: #selector(revealStatusFolder), keyEquivalent: "r")) // 20
+        menu.addItem(NSMenuItem.separator())                                                         // 21
+        menu.addItem(NSMenuItem(title: "Check for Updates...", action: #selector(checkForUpdatesManually), keyEquivalent: "")) // 22
+        menu.addItem(NSMenuItem(title: "Restart", action: #selector(restart), keyEquivalent: "R")) // 23
+        menu.addItem(NSMenuItem(title: "Quit", action: #selector(quit), keyEquivalent: "q"))       // 24
         statusItem.menu = menu
     }
 
@@ -2060,14 +2067,15 @@ final class CodexMenuBarApp: NSObject, NSApplicationDelegate {
 
         // Update header to reflect combined state
         let agActive = currentAntigravitySnapshot.isActive(activeWindowSeconds: settings.activeWindowSeconds, now: now)
-        let headerTitle: String
+        let baseHeaderTitle: String
         if agActive && status != "idle" {
-            headerTitle = "Codex + AGY"
+            baseHeaderTitle = "Codex + AGY"
         } else if agActive {
-            headerTitle = "AGY Running"
+            baseHeaderTitle = "AGY Running"
         } else {
-            headerTitle = "Codex Menu Bar"
+            baseHeaderTitle = "Codex Menu Bar"
         }
+        let headerTitle = "\(baseHeaderTitle) v\(currentVersion) (\(buildDate)) by choihunchul"
         menu.item(at: 0)?.title = headerTitle
 
         if let summaryItem = menu.item(at: 2) {
@@ -2375,6 +2383,30 @@ final class CodexMenuBarApp: NSObject, NSApplicationDelegate {
         return "\(seconds)s ago"
     }
 
+    private var currentVersion: String {
+        Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "1.0.5"
+    }
+
+    private var buildDate: String {
+        if let plistDate = Bundle.main.infoDictionary?["CFBuildDate"] as? String {
+            return plistDate
+        }
+        if let executableURL = Bundle.main.executableURL,
+           let attributes = try? FileManager.default.attributesOfItem(atPath: executableURL.path),
+           let modificationDate = attributes[.modificationDate] as? Date {
+            let formatter = DateFormatter()
+            formatter.dateFormat = "yyyy-MM-dd"
+            return formatter.string(from: modificationDate)
+        }
+        return "2026-06-05"
+    }
+
+    @objc private func openGitHub() {
+        if let url = URL(string: "https://github.com/hunchulchoi/codex-menu-bar") {
+            NSWorkspace.shared.open(url)
+        }
+    }
+
     @objc private func openSettings() {
         if let settingsWindow {
             settingsWindow.makeKeyAndOrderFront(nil)
@@ -2634,8 +2666,8 @@ final class CodexMenuBarApp: NSObject, NSApplicationDelegate {
     }
 
     private func updateMenuItemTitle(_ title: String) {
-        guard let menu = statusItem.menu, menu.numberOfItems > 21 else { return }
-        menu.item(at: 21)?.title = title
+        guard let menu = statusItem.menu, menu.numberOfItems > 22 else { return }
+        menu.item(at: 22)?.title = title
     }
 
     private func showAlert(title: String, message: String) {
