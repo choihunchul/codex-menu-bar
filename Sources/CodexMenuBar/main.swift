@@ -31,6 +31,7 @@ struct StatusPayload: Decodable {
 struct AppSettings: Codable {
     var autoWatchEnabled: Bool
     var antigravityWatchEnabled: Bool
+    var cursorWatchEnabled: Bool
     var activeWindowSeconds: TimeInterval
     var pollIntervalSeconds: TimeInterval
     var weeklyLimitText: String?
@@ -41,6 +42,7 @@ struct AppSettings: Codable {
         AppSettings(
             autoWatchEnabled: ProcessInfo.processInfo.environment["CODEX_MENU_BAR_AUTO_WATCH"] != "0",
             antigravityWatchEnabled: ProcessInfo.processInfo.environment["CODEX_MENU_BAR_AGY_WATCH"] != "0",
+            cursorWatchEnabled: ProcessInfo.processInfo.environment["CODEX_MENU_BAR_CURSOR_WATCH"] != "0",
             activeWindowSeconds: envTimeInterval("CODEX_MENU_BAR_ACTIVE_WINDOW_SECONDS", defaultValue: 4, minimum: 1),
             pollIntervalSeconds: envTimeInterval("CODEX_MENU_BAR_POLL_INTERVAL_SECONDS", defaultValue: 0.8, minimum: 0.25),
             weeklyLimitText: ProcessInfo.processInfo.environment["CODEX_MENU_BAR_WEEKLY_LIMIT"],
@@ -53,6 +55,7 @@ struct AppSettings: Codable {
         AppSettings(
             autoWatchEnabled: autoWatchEnabled,
             antigravityWatchEnabled: antigravityWatchEnabled,
+            cursorWatchEnabled: cursorWatchEnabled,
             activeWindowSeconds: max(1, activeWindowSeconds),
             pollIntervalSeconds: max(0.25, pollIntervalSeconds),
             weeklyLimitText: cleanText(weeklyLimitText),
@@ -114,6 +117,12 @@ func codexMenuBarIsCodexApplication(bundleIdentifier: String?, localizedName: St
         return true
     }
     if name.contains("codex") && !name.contains("codex menu bar") && !name.contains("codexmenubar") {
+        return true
+    }
+    if bundle.contains("com.todesktop.230313mzl4w4u92") || bundle.contains("cursor") {
+        return true
+    }
+    if name.contains("cursor") {
         return true
     }
     return false
@@ -1407,6 +1416,7 @@ final class CodexMenuBarApp: NSObject, NSApplicationDelegate {
     private var settingsWindow: NSWindow?
     private var autoWatchCheckbox: NSButton?
     private var agWatchCheckbox: NSButton?
+    private var cursorWatchCheckbox: NSButton?
     private var autoUpdateCheckbox: NSButton?
     private var activeWindowField: NSTextField?
     private var pollIntervalField: NSTextField?
@@ -1429,6 +1439,14 @@ final class CodexMenuBarApp: NSObject, NSApplicationDelegate {
     // MARK: - Antigravity
     private var currentAntigravitySnapshot = AntigravityActivitySnapshot.empty
     private var latestAntigravityActivity: Date?
+
+    // MARK: - Cursor
+    private var currentCursorSnapshot = CursorActivitySnapshot.empty
+    private var latestCursorActivity: Date?
+    private var currentCursorLimitState = CursorLimitState.empty
+    private var lastCursorLimitRefresh = Date.distantPast
+    private var isRefreshingCursorLimits = false
+    private let cursorLimitRefreshInterval: TimeInterval = 300 // 5 minutes
 
     private let frames = ["|", "/", "-", "\\"]
     private let limitRefreshInterval: TimeInterval = 20
@@ -1474,6 +1492,11 @@ final class CodexMenuBarApp: NSObject, NSApplicationDelegate {
         FileManager.default.homeDirectoryForCurrentUser
             .appendingPathComponent(".gemini")
             .appendingPathComponent("antigravity")
+    }
+
+    private var cursorHome: URL {
+        FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent("Library/Application Support/Cursor")
     }
 
     private var modelsCacheFile: URL {
@@ -1637,14 +1660,19 @@ final class CodexMenuBarApp: NSObject, NSApplicationDelegate {
         menu.addItem(NSMenuItem(title: "AGY Conversations: -", action: nil, keyEquivalent: ""))    // 15
         menu.addItem(NSMenuItem.separator())                                                         // 16
         
-        menu.addItem(NSMenuItem(title: "GitHub Repository...", action: #selector(openGitHub), keyEquivalent: "")) // 17
-        menu.addItem(NSMenuItem(title: "Settings...", action: #selector(openSettings), keyEquivalent: ","))         // 18
-        menu.addItem(NSMenuItem(title: "Open Status File", action: #selector(openStatusFile), keyEquivalent: "o")) // 19
-        menu.addItem(NSMenuItem(title: "Reveal Status Folder", action: #selector(revealStatusFolder), keyEquivalent: "r")) // 20
-        menu.addItem(NSMenuItem.separator())                                                         // 21
-        menu.addItem(NSMenuItem(title: "Check for Updates...", action: #selector(checkForUpdatesManually), keyEquivalent: "")) // 22
-        menu.addItem(NSMenuItem(title: "Restart", action: #selector(restart), keyEquivalent: "R")) // 23
-        menu.addItem(NSMenuItem(title: "Quit", action: #selector(quit), keyEquivalent: "q"))       // 24
+        menu.addItem(NSMenuItem(title: "Cursor: -", action: nil, keyEquivalent: ""))               // 17
+        menu.addItem(NSMenuItem(title: "Cursor Activity: -", action: nil, keyEquivalent: ""))      // 18
+        menu.addItem(NSMenuItem(title: "Cursor Quota: -", action: nil, keyEquivalent: ""))         // 19
+        menu.addItem(NSMenuItem.separator())                                                         // 20
+        
+        menu.addItem(NSMenuItem(title: "GitHub Repository...", action: #selector(openGitHub), keyEquivalent: "")) // 21
+        menu.addItem(NSMenuItem(title: "Settings...", action: #selector(openSettings), keyEquivalent: ","))         // 22
+        menu.addItem(NSMenuItem(title: "Open Status File", action: #selector(openStatusFile), keyEquivalent: "o")) // 23
+        menu.addItem(NSMenuItem(title: "Reveal Status Folder", action: #selector(revealStatusFolder), keyEquivalent: "r")) // 24
+        menu.addItem(NSMenuItem.separator())                                                         // 25
+        menu.addItem(NSMenuItem(title: "Check for Updates...", action: #selector(checkForUpdatesManually), keyEquivalent: "")) // 26
+        menu.addItem(NSMenuItem(title: "Restart", action: #selector(restart), keyEquivalent: "R")) // 27
+        menu.addItem(NSMenuItem(title: "Quit", action: #selector(quit), keyEquivalent: "q"))       // 28
         statusItem.menu = menu
     }
 
@@ -1653,6 +1681,8 @@ final class CodexMenuBarApp: NSObject, NSApplicationDelegate {
         currentPayload = resolvePayload(manualPayload)
         refreshLimitStateIfNeeded()
         refreshAntigravitySnapshot()
+        refreshCursorSnapshot()
+        refreshCursorLimitStateIfNeeded()
         frameIndex = (frameIndex + 1) % frames.count
         updateMenuBarIcon()
         updateMenu()
@@ -1670,6 +1700,52 @@ final class CodexMenuBarApp: NSObject, NSApplicationDelegate {
         let snapshot = reader.readSnapshot(activeWindowSeconds: settings.activeWindowSeconds)
         currentAntigravitySnapshot = snapshot
         latestAntigravityActivity = snapshot.lastActivityDate
+    }
+
+    private func refreshCursorSnapshot() {
+        guard settings.cursorWatchEnabled else {
+            if currentCursorSnapshot.lastUserActivityDate != nil {
+                currentCursorSnapshot = .empty
+                latestCursorActivity = nil
+            }
+            return
+        }
+        let reader = CursorActivityReader(cursorHome: cursorHome)
+        let snapshot = reader.readSnapshot(activeWindowSeconds: settings.activeWindowSeconds)
+        currentCursorSnapshot = snapshot
+        latestCursorActivity = [snapshot.lastUserActivityDate, snapshot.lastAgentActivityDate].compactMap { $0 }.max()
+    }
+
+    private func refreshCursorLimitStateIfNeeded(force: Bool = false) {
+        let now = Date()
+        let isCursorAppRunning = NSRunningApplication.runningApplications(withBundleIdentifier: "com.todesktop.230313mzl4w4u92").first != nil
+        let wasRecentlyActive = latestCursorActivity.map { now.timeIntervalSince($0) <= 300.0 } == true
+        
+        guard isCursorAppRunning || wasRecentlyActive else {
+            return
+        }
+        
+        guard force || now.timeIntervalSince(lastCursorLimitRefresh) >= cursorLimitRefreshInterval else {
+            return
+        }
+        guard !isRefreshingCursorLimits else {
+            return
+        }
+
+        isRefreshingCursorLimits = true
+        lastCursorLimitRefresh = now
+        let reader = CursorLimitReader(cursorHome: cursorHome)
+
+        DispatchQueue.global(qos: .utility).async { [reader] in
+            let state = reader.readLiveUsage() ?? .empty
+            Task { @MainActor [weak self] in
+                guard let self else { return }
+                self.currentCursorLimitState = state
+                self.isRefreshingCursorLimits = false
+                self.updateMenuBarIcon()
+                self.updateMenu()
+            }
+        }
     }
 
     private func refreshLimitStateIfNeeded(force: Bool = false) {
@@ -2011,8 +2087,10 @@ final class CodexMenuBarApp: NSObject, NSApplicationDelegate {
         let agActive = settings.antigravityWatchEnabled
             && currentAntigravitySnapshot.isActive(activeWindowSeconds: settings.activeWindowSeconds, now: now)
         let agStatus = settings.antigravityWatchEnabled ? currentPayload?.antigravity?.status : nil
+        let cursorActive = settings.cursorWatchEnabled
+            && currentCursorSnapshot.isActive(activeWindowSeconds: settings.activeWindowSeconds, now: now)
 
-        // AGY 상태를 렌더러에 전달 → 이미지 안에 보라색 점으로 표시
+        // AGY & Cursor 상태를 렌더러에 전달 → 이미지 안에 보라색/청록색 점으로 표시
         let iconImage = menuIconRenderer.image(
             status: status,
             isRecentlyCompleted: isRecentlyCompleted(),
@@ -2021,6 +2099,8 @@ final class CodexMenuBarApp: NSObject, NSApplicationDelegate {
             weeklyUsagePercent: currentLimitState.secondary?.usedPercent,
             agActive: agActive,
             agStatus: agStatus,
+            cursorActive: cursorActive,
+            cursorStatus: cursorActive ? "running" : nil,
             hasUpdate: availableUpdateVersion != nil
         )
         if let button = statusItem.button {
@@ -2052,6 +2132,12 @@ final class CodexMenuBarApp: NSObject, NSApplicationDelegate {
            agStatus == "awaiting approval" || agStatus == "running" {
             return true
         }
+        
+        let cursorActive = settings.cursorWatchEnabled
+            && currentCursorSnapshot.isActive(activeWindowSeconds: settings.activeWindowSeconds, now: now)
+        if cursorActive {
+            return true
+        }
 
         return false
     }
@@ -2067,8 +2153,18 @@ final class CodexMenuBarApp: NSObject, NSApplicationDelegate {
 
         // Update header to reflect combined state
         let agActive = currentAntigravitySnapshot.isActive(activeWindowSeconds: settings.activeWindowSeconds, now: now)
+        let cursorActive = currentCursorSnapshot.isActive(activeWindowSeconds: settings.activeWindowSeconds, now: now)
+        
         let baseHeaderTitle: String
-        if agActive && status != "idle" {
+        if agActive && cursorActive && status != "idle" {
+            baseHeaderTitle = "Codex+AGY+Cursor"
+        } else if agActive && cursorActive {
+            baseHeaderTitle = "AGY + Cursor"
+        } else if cursorActive && status != "idle" {
+            baseHeaderTitle = "Codex + Cursor"
+        } else if cursorActive {
+            baseHeaderTitle = "Cursor Running"
+        } else if agActive && status != "idle" {
             baseHeaderTitle = "Codex + AGY"
         } else if agActive {
             baseHeaderTitle = "AGY Running"
@@ -2151,6 +2247,40 @@ final class CodexMenuBarApp: NSObject, NSApplicationDelegate {
             menu.item(at: 13)?.title = "AGY: disabled"
             menu.item(at: 14)?.title = "AGY Activity: -"
             menu.item(at: 15)?.title = "AGY Conversations: -"
+        }
+
+        // Cursor section
+        if settings.cursorWatchEnabled {
+            let cursorStatusText = cursorActive ? "● Running" : "○ Idle"
+            menu.item(at: 17)?.title = "Cursor: \(cursorStatusText)"
+            
+            let cursorActivityText: String
+            if let lastDate = latestCursorActivity {
+                let seconds = max(0, Int(now.timeIntervalSince(lastDate)))
+                cursorActivityText = "\(formatActivityAgeShort(seconds)) ago"
+            } else {
+                cursorActivityText = "-"
+            }
+            menu.item(at: 18)?.title = "Cursor Activity: \(cursorActivityText)"
+            
+            let quotaText: String
+            if currentCursorLimitState.source == "live" {
+                let apiUsed = currentCursorLimitState.apiPercentUsed.map { String(format: "%.1f%%", $0) } ?? "-"
+                let totalUsed = currentCursorLimitState.totalPercentUsed.map { String(format: "%.1f%%", $0) } ?? "-"
+                let spend = currentCursorLimitState.totalSpendUSD.map { String(format: "$%.2f", $0) } ?? "-"
+                let limit = currentCursorLimitState.limitUSD.map { String(format: "$%.2f", $0) } ?? "-"
+                let tokens = currentCursorLimitState.totalTokens.map { formatTokenCount($0) } ?? "-"
+                let requests = currentCursorLimitState.totalRequests.map { "\($0) reqs" } ?? "-"
+                
+                quotaText = "\(apiUsed) API (\(totalUsed) total) | \(spend)/\(limit) | \(tokens) (\(requests))"
+            } else {
+                quotaText = "No quota data"
+            }
+            menu.item(at: 19)?.title = "Cursor Quota: \(quotaText)"
+        } else {
+            menu.item(at: 17)?.title = "Cursor: disabled"
+            menu.item(at: 18)?.title = "Cursor Activity: -"
+            menu.item(at: 19)?.title = "Cursor Quota: -"
         }
     }
 
@@ -2424,19 +2554,25 @@ final class CodexMenuBarApp: NSObject, NSApplicationDelegate {
         window.isReleasedWhenClosed = false
         window.center()
 
-        let view = NSView(frame: window.contentView?.bounds ?? NSRect(x: 0, y: 0, width: 420, height: 380))
+        let view = NSView(frame: window.contentView?.bounds ?? NSRect(x: 0, y: 0, width: 420, height: 410))
 
         let checkbox = NSButton(checkboxWithTitle: "Auto watch Codex activity", target: nil, action: nil)
-        checkbox.frame = NSRect(x: 24, y: 326, width: 280, height: 24)
+        checkbox.frame = NSRect(x: 24, y: 356, width: 280, height: 24)
         checkbox.state = settings.autoWatchEnabled ? .on : .off
         view.addSubview(checkbox)
         autoWatchCheckbox = checkbox
 
         let agCheckbox = NSButton(checkboxWithTitle: "Auto watch Antigravity activity", target: nil, action: nil)
-        agCheckbox.frame = NSRect(x: 24, y: 296, width: 280, height: 24)
+        agCheckbox.frame = NSRect(x: 24, y: 326, width: 280, height: 24)
         agCheckbox.state = settings.antigravityWatchEnabled ? .on : .off
         view.addSubview(agCheckbox)
         agWatchCheckbox = agCheckbox
+
+        let cursorCheckbox = NSButton(checkboxWithTitle: "Auto watch Cursor activity", target: nil, action: nil)
+        cursorCheckbox.frame = NSRect(x: 24, y: 296, width: 280, height: 24)
+        cursorCheckbox.state = settings.cursorWatchEnabled ? .on : .off
+        view.addSubview(cursorCheckbox)
+        cursorWatchCheckbox = cursorCheckbox
 
         let updateCheckbox = NSButton(checkboxWithTitle: "Auto check for updates", target: nil, action: nil)
         updateCheckbox.frame = NSRect(x: 24, y: 266, width: 280, height: 24)
@@ -2515,6 +2651,7 @@ final class CodexMenuBarApp: NSObject, NSApplicationDelegate {
         settings = AppSettings(
             autoWatchEnabled: autoWatchCheckbox?.state == .on,
             antigravityWatchEnabled: agWatchCheckbox?.state == .on,
+            cursorWatchEnabled: cursorWatchCheckbox?.state == .on,
             activeWindowSeconds: active,
             pollIntervalSeconds: poll,
             weeklyLimitText: weeklyLimitField?.stringValue,
@@ -2531,6 +2668,7 @@ final class CodexMenuBarApp: NSObject, NSApplicationDelegate {
         settings = AppSettings.defaults()
         autoWatchCheckbox?.state = settings.autoWatchEnabled ? .on : .off
         agWatchCheckbox?.state = settings.antigravityWatchEnabled ? .on : .off
+        cursorWatchCheckbox?.state = settings.cursorWatchEnabled ? .on : .off
         autoUpdateCheckbox?.state = (settings.autoUpdateEnabled ?? true) ? .on : .off
         activeWindowField?.stringValue = formatSeconds(settings.activeWindowSeconds)
         pollIntervalField?.stringValue = formatSeconds(settings.pollIntervalSeconds)
@@ -2666,8 +2804,8 @@ final class CodexMenuBarApp: NSObject, NSApplicationDelegate {
     }
 
     private func updateMenuItemTitle(_ title: String) {
-        guard let menu = statusItem.menu, menu.numberOfItems > 22 else { return }
-        menu.item(at: 22)?.title = title
+        guard let menu = statusItem.menu, menu.numberOfItems > 26 else { return }
+        menu.item(at: 26)?.title = title
     }
 
     private func showAlert(title: String, message: String) {
