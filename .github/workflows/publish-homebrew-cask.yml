@@ -36,11 +36,16 @@ jobs:
     needs: resolve-tag
     uses: choihunchul/github--actions/.github/workflows/publish-homebrew-cask.yml@main
     with:
-      repository: 'choihunchul/codex-menu-bar'
-      cask: 'codex-menu-bar'
-      asset: 'CodexMenuBar.dmg'
-      app: 'CodexMenuBar.app'
+      tap-repo: 'choihunchul/homebrew-tap'
+      cask-name: 'codex-menu-bar'
+      name: 'Codex Menu Bar'
+      desc: 'Local Codex, Cursor, and Antigravity plugin macOS companion app'
+      homepage: 'https://github.com/choihunchul/codex-menu-bar'
+      app-name: 'CodexMenuBar.app'
+      asset-name: 'CodexMenuBar.dmg'
       tag: ${{ needs.resolve-tag.outputs.tag }}
       verify-tag: false
+      zap-trash: '~/.codex-menu-bar ~/Library/Application?Support/CodexMenuBar'
+      release-repo: 'choihunchul/codex-menu-bar'
     secrets:
-      token: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+      HOMEBREW_TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
