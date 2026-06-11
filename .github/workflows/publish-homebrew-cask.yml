@@ -16,17 +16,31 @@ permissions:
   contents: read
 
 jobs:
-  call-reusable-workflow:
+  resolve-tag:
     if: ${{ github.event_name == 'workflow_dispatch' || (github.event_name == 'workflow_run' && github.event.workflow_run.conclusion == 'success') }}
+    runs-on: ubuntu-latest
+    outputs:
+      tag: ${{ steps.get_tag.outputs.tag }}
+    steps:
+      - name: Get Tag
+        id: get_tag
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            TAG="${{ github.event.inputs.tag }}"
+          else
+            TAG=$(curl -fsSL https://api.github.com/repos/choihunchul/codex-menu-bar/releases/latest | jq -r .tag_name)
+          fi
+          echo "tag=$TAG" >> $GITHUB_OUTPUT
+
+  publish:
+    needs: resolve-tag
     uses: choihunchul/github--actions/.github/workflows/publish-homebrew-cask.yml@main
     with:
       repository: 'choihunchul/codex-menu-bar'
-      cask_name: 'codex-menu-bar'
-      cask_display_name: 'Codex Menu Bar'
-      cask_desc: 'Local Codex, Cursor, and Antigravity plugin macOS companion app'
-      cask_homepage: 'https://github.com/choihunchul/codex-menu-bar'
-      cask_app: 'CodexMenuBar.app'
-      download_url_template: 'https://github.com/choihunchul/codex-menu-bar/releases/download/{tag}/CodexMenuBar.dmg'
-      tag: ${{ github.event.inputs.tag }}
+      cask: 'codex-menu-bar'
+      asset: 'CodexMenuBar.dmg'
+      app: 'CodexMenuBar.app'
+      tag: ${{ needs.resolve-tag.outputs.tag }}
+      verify-tag: false
     secrets:
       token: ${{ secrets.HOMEBREW_TAP_TOKEN }}
