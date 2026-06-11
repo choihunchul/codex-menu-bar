@@ -53,7 +53,9 @@ final class CursorActivityReader: @unchecked Sendable {
     
     private func findLatestAgentActivityDate() -> Date? {
         guard fileManager.fileExists(atPath: logsURL.path) else { return nil }
-        guard let enumerator = fileManager.enumerator(
+        
+        // Shallow scan logs directory to find session subdirectories
+        guard let contents = try? fileManager.contentsOfDirectory(
             at: logsURL,
             includingPropertiesForKeys: [.contentModificationDateKey],
             options: [.skipsHiddenFiles]
@@ -61,18 +63,61 @@ final class CursorActivityReader: @unchecked Sendable {
             return nil
         }
         
+        let now = Date()
+        // Filter to directories modified in the last 1 hour
+        var dirsToScan = contents
+            .compactMap { url -> (URL, Date)? in
+                guard let values = try? url.resourceValues(forKeys: [.contentModificationDateKey]),
+                      let modDate = values.contentModificationDate else {
+                    return nil
+                }
+                return (url, modDate)
+            }
+            .filter { _, modDate in
+                now.timeIntervalSince(modDate) <= 3600.0
+            }
+            .sorted { $0.1 > $1.1 }
+            .map { $0.0 }
+        
+        // Fallback to the single most recently modified directory if none modified in the last hour
+        if dirsToScan.isEmpty {
+            if let latestDir = contents
+                .compactMap({ url -> (URL, Date)? in
+                    guard let values = try? url.resourceValues(forKeys: [.contentModificationDateKey]),
+                          let modDate = values.contentModificationDate else {
+                        return nil
+                    }
+                    return (url, modDate)
+                })
+                .sorted(by: { $0.1 > $1.1 })
+                .first?.0 {
+                dirsToScan = [latestDir]
+            }
+        }
+        
         var latestDate: Date? = nil
-        for case let fileURL as URL in enumerator {
-            if fileURL.path.contains("anysphere.cursor-agent-exec"),
-               fileURL.lastPathComponent.hasPrefix("Cursor Agent Exec") {
-                if let values = try? fileURL.resourceValues(forKeys: [.contentModificationDateKey]),
-                   let modDate = values.contentModificationDate {
-                    if latestDate == nil || modDate > latestDate! {
-                        latestDate = modDate
+        for dir in dirsToScan {
+            guard let enumerator = fileManager.enumerator(
+                at: dir,
+                includingPropertiesForKeys: [.contentModificationDateKey],
+                options: [.skipsHiddenFiles]
+            ) else {
+                continue
+            }
+            
+            for case let fileURL as URL in enumerator {
+                if fileURL.path.contains("anysphere.cursor-agent-exec"),
+                   fileURL.lastPathComponent.hasPrefix("Cursor Agent Exec") {
+                    if let values = try? fileURL.resourceValues(forKeys: [.contentModificationDateKey]),
+                       let modDate = values.contentModificationDate {
+                        if latestDate == nil || modDate > latestDate! {
+                            latestDate = modDate
+                        }
                     }
                 }
             }
         }
+        
         return latestDate
     }
 }

@@ -243,10 +243,28 @@ final class LimitStateReader: @unchecked Sendable {
     private let liveUsageURL = URL(string: "https://chatgpt.com/backend-api/wham/usage")!
     private let decoder = JSONDecoder()
 
+    // Thread-safe Cache Storage
+    private let lock = NSLock()
+    private var cachedRuntimeSignalSnapshotDate: Date?
+    private var cachedRuntimeSignalSnapshot: CodexRuntimeSignalSnapshot?
+    private var cachedTokenUsageStatsDate: Date?
+    private var cachedTokenUsageStats: TokenUsageSummary?
+    private var cachedModelNameDate: Date?
+    private var cachedModelName: String?
+    private var cachedLatestLogStateDate: Date?
+    private var cachedLatestLogState: LimitState?
+
     init(codexHome: URL) {
         logsPath = codexHome.appendingPathComponent("logs_2.sqlite")
         authPath = codexHome.appendingPathComponent("auth.json")
         modelsCacheFile = codexHome.appendingPathComponent("models_cache.json")
+    }
+
+    private func getLogsModificationDate() -> Date? {
+        guard let values = try? logsPath.resourceValues(forKeys: [.contentModificationDateKey]) else {
+            return nil
+        }
+        return values.contentModificationDate
     }
 
     func readLatest() -> LimitState {
@@ -257,6 +275,14 @@ final class LimitStateReader: @unchecked Sendable {
     }
 
     func readCurrentModelName() -> String? {
+        let modDate = getLogsModificationDate()
+        lock.lock()
+        if let cachedDate = cachedModelNameDate, let cached = cachedModelName, modDate == cachedDate {
+            lock.unlock()
+            return cached
+        }
+        lock.unlock()
+
         guard FileManager.default.fileExists(atPath: logsPath.path) else {
             return nil
         }
@@ -286,7 +312,14 @@ final class LimitStateReader: @unchecked Sendable {
         }
 
         let body = String(cString: cText)
-        return parseModelName(from: body)
+        let result = parseModelName(from: body)
+
+        lock.lock()
+        cachedModelNameDate = modDate
+        cachedModelName = result
+        lock.unlock()
+
+        return result
     }
 
     func readCurrentContextWindow(for modelName: String?) -> Int? {
@@ -297,6 +330,14 @@ final class LimitStateReader: @unchecked Sendable {
     }
 
     func readTokenUsageStats() -> TokenUsageSummary {
+        let modDate = getLogsModificationDate()
+        lock.lock()
+        if let cachedDate = cachedTokenUsageStatsDate, let cached = cachedTokenUsageStats, modDate == cachedDate {
+            lock.unlock()
+            return cached
+        }
+        lock.unlock()
+
         guard FileManager.default.fileExists(atPath: logsPath.path) else {
             return .empty
         }
@@ -334,15 +375,30 @@ final class LimitStateReader: @unchecked Sendable {
             samples.append(sample)
         }
 
-        return TokenUsageSummary.build(
+        let result = TokenUsageSummary.build(
             samples: samples,
             now: Date(),
             calendar: Calendar.current,
             fiveHourBucketCount: 30
         )
+
+        lock.lock()
+        cachedTokenUsageStatsDate = modDate
+        cachedTokenUsageStats = result
+        lock.unlock()
+
+        return result
     }
 
     func readRuntimeSignalSnapshot() -> CodexRuntimeSignalSnapshot? {
+        let modDate = getLogsModificationDate()
+        lock.lock()
+        if let cachedDate = cachedRuntimeSignalSnapshotDate, let cached = cachedRuntimeSignalSnapshot, modDate == cachedDate {
+            lock.unlock()
+            return cached
+        }
+        lock.unlock()
+
         guard FileManager.default.fileExists(atPath: logsPath.path) else {
             return nil
         }
@@ -402,7 +458,14 @@ final class LimitStateReader: @unchecked Sendable {
             }
         }
 
-        return (snapshot.runningAt != nil || snapshot.approvalAt != nil || snapshot.completedAt != nil || snapshot.waitingAt != nil || snapshot.messageAt != nil || snapshot.errorAt != nil) ? snapshot : nil
+        let result = (snapshot.runningAt != nil || snapshot.approvalAt != nil || snapshot.completedAt != nil || snapshot.waitingAt != nil || snapshot.messageAt != nil || snapshot.errorAt != nil) ? snapshot : nil
+
+        lock.lock()
+        cachedRuntimeSignalSnapshotDate = modDate
+        cachedRuntimeSignalSnapshot = result
+        lock.unlock()
+
+        return result
     }
 
     func codexRecordRuntimeSignal(from body: String, at date: Date, into snapshot: inout CodexRuntimeSignalSnapshot) {
@@ -493,6 +556,14 @@ final class LimitStateReader: @unchecked Sendable {
     }
 
     private func readLatestLog() -> LimitState {
+        let modDate = getLogsModificationDate()
+        lock.lock()
+        if let cachedDate = cachedLatestLogStateDate, let cached = cachedLatestLogState, modDate == cachedDate {
+            lock.unlock()
+            return cached
+        }
+        lock.unlock()
+
         guard FileManager.default.fileExists(atPath: logsPath.path) else {
             return .empty
         }
@@ -530,13 +601,20 @@ final class LimitStateReader: @unchecked Sendable {
             return .empty
         }
 
-        return LimitState(
+        let result = LimitState(
             planType: payload.plan_type,
             primary: (payload.rate_limits?.primary ?? payload.rate_limits?.primary_window)?.toBucket(),
             secondary: (payload.rate_limits?.secondary ?? payload.rate_limits?.secondary_window)?.toBucket(),
             observedAt: Date(),
             source: "cached"
         )
+
+        lock.lock()
+        cachedLatestLogStateDate = modDate
+        cachedLatestLogState = result
+        lock.unlock()
+
+        return result
     }
 
     private func extractRateLimitJSON(from body: String) -> String? {
@@ -1603,6 +1681,12 @@ final class CodexMenuBarApp: NSObject, NSApplicationDelegate {
     private var availableUpdateURL: URL?
     private var updateCheckTimer: Timer?
 
+    // Shared Reader Instances
+    private lazy var limitStateReader = LimitStateReader(codexHome: codexHome)
+    private lazy var cursorActivityReader = CursorActivityReader(cursorHome: cursorHome)
+    private lazy var cursorLimitReader = CursorLimitReader(cursorHome: cursorHome)
+    private lazy var antigravityActivityReader = AntigravityActivityReader(antigravityHome: antigravityHome)
+
     // MARK: - Antigravity
     private var currentAntigravitySnapshot = AntigravityActivitySnapshot.empty
     private var latestAntigravityActivity: Date?
@@ -1865,8 +1949,7 @@ final class CodexMenuBarApp: NSObject, NSApplicationDelegate {
             }
             return
         }
-        let reader = AntigravityActivityReader(antigravityHome: antigravityHome)
-        let snapshot = reader.readSnapshot(activeWindowSeconds: settings.activeWindowSeconds)
+        let snapshot = antigravityActivityReader.readSnapshot(activeWindowSeconds: settings.activeWindowSeconds)
         currentAntigravitySnapshot = snapshot
         latestAntigravityActivity = snapshot.lastActivityDate
     }
@@ -1879,8 +1962,7 @@ final class CodexMenuBarApp: NSObject, NSApplicationDelegate {
             }
             return
         }
-        let reader = CursorActivityReader(cursorHome: cursorHome)
-        let snapshot = reader.readSnapshot(activeWindowSeconds: settings.activeWindowSeconds)
+        let snapshot = cursorActivityReader.readSnapshot(activeWindowSeconds: settings.activeWindowSeconds)
         currentCursorSnapshot = snapshot
         latestCursorActivity = [snapshot.lastUserActivityDate, snapshot.lastAgentActivityDate].compactMap { $0 }.max()
     }
@@ -1903,7 +1985,7 @@ final class CodexMenuBarApp: NSObject, NSApplicationDelegate {
 
         isRefreshingCursorLimits = true
         lastCursorLimitRefresh = now
-        let reader = CursorLimitReader(cursorHome: cursorHome)
+        let reader = cursorLimitReader
 
         DispatchQueue.global(qos: .utility).async { [reader] in
             let state = reader.readLiveUsage() ?? .empty
@@ -1928,7 +2010,7 @@ final class CodexMenuBarApp: NSObject, NSApplicationDelegate {
 
         isRefreshingLimits = true
         lastLimitRefresh = now
-        let reader = LimitStateReader(codexHome: codexHome)
+        let reader = limitStateReader
         let modelNameAtRefresh = currentPayload?.model ?? currentModelName
 
         DispatchQueue.global(qos: .utility).async { [reader] in
@@ -2106,8 +2188,7 @@ final class CodexMenuBarApp: NSObject, NSApplicationDelegate {
         }
 
         if settings.autoWatchEnabled {
-            let runtimeReader = LimitStateReader(codexHome: codexHome)
-            if let runtimeSnapshot = runtimeReader.readRuntimeSignalSnapshot(),
+            if let runtimeSnapshot = limitStateReader.readRuntimeSignalSnapshot(),
                let runtimeKind = codexResolvedRuntimeStatus(from: runtimeSnapshot) {
                 let runtimeStatus = canonicalStatusText(for: runtimeKind)
                 let runtimeDetail = defaultDetail(for: runtimeStatus)
@@ -2699,7 +2780,7 @@ final class CodexMenuBarApp: NSObject, NSApplicationDelegate {
     }
 
     private var currentVersion: String {
-        Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "1.0.6"
+        Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "1.0.7"
     }
 
     private var buildDate: String {
