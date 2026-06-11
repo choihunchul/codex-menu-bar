@@ -50,3 +50,24 @@ node scripts/codex-status-cli.mjs message "Action needed"
 node scripts/codex-status-cli.mjs error "Needs attention"
 node scripts/codex-status-cli.mjs idle "Ready"
 ```
+
+## Release & Deployment Workflow
+
+When performing a new release and deploying the macOS companion app to the Homebrew Cask tap:
+
+1. **Version Bump**:
+   - Update the fallback version string constant in `Sources/CodexMenuBar/main.swift` (e.g. `currentVersion` fallback from `"1.0.7"` to `"1.0.8"`).
+2. **Build and Test**:
+   - Run `swift build` and `swift test` locally to ensure there are no compilation or unit test failures.
+3. **Commit & Push**:
+   - Commit the changes and push to `main` branch.
+4. **Git Tagging**:
+   - Create a version tag matching `v*` and push it:
+     ```bash
+     git tag v1.0.8
+     git push origin v1.0.8
+     ```
+5. **CI/CD Pipeline**:
+   - Pushing the tag triggers the **Build and Release** workflow which generates `CodexMenuBar.dmg` and uploads it to GitHub Releases.
+   - Upon completion, the **Publish Homebrew Cask** workflow is automatically triggered via `workflow_run` (or can be manually dispatched), calling the reusable workflow in `choihunchul/github--actions` to publish the updated Cask to `choihunchul/homebrew-tap` with the calculated SHA-256 and version.
+
