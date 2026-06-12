@@ -2245,6 +2245,37 @@ final class CodexMenuBarApp: NSObject, NSApplicationDelegate {
     }
 
     private func resolvePayload(_ manual: StatusPayload?) -> StatusPayload {
+        let raw = resolvePayloadRaw(manual)
+        
+        let finalStatus: String
+        let finalDetail: String
+        
+        if availableUpdateVersion != nil {
+            finalStatus = "update"
+            finalDetail = "Update Available (\(availableUpdateVersion!))"
+        } else if raw.status?.lowercased() == "running" {
+            finalStatus = "running"
+            finalDetail = raw.detail ?? "Codex is working"
+        } else {
+            finalStatus = "idle"
+            finalDetail = "Ready"
+        }
+        
+        return StatusPayload(
+            status: finalStatus,
+            detail: finalDetail,
+            thread: raw.thread,
+            progress: raw.progress,
+            updatedAt: raw.updatedAt,
+            startedAt: raw.startedAt,
+            model: raw.model,
+            contextWindow: raw.contextWindow,
+            tokenUsage: raw.tokenUsage,
+            antigravity: raw.antigravity
+        )
+    }
+
+    private func resolvePayloadRaw(_ manual: StatusPayload?) -> StatusPayload {
         let now = Date()
         let activity = latestCodexActivityDate()
         latestCodexActivity = activity
@@ -2831,15 +2862,7 @@ final class CodexMenuBarApp: NSObject, NSApplicationDelegate {
     }
 
     private func isRecentlyCompleted() -> Bool {
-        let status = CodexStatusKind(status: currentPayload?.status ?? "idle")
-        let referenceDate = currentPayload?.startedAt.flatMap { parseISODate($0) }
-            ?? currentTokenUsageStats.latestObservedAt
-            ?? latestCodexActivity
-        return codexMenuBarShouldShowRecentCompletion(
-            status: status,
-            referenceDate: referenceDate,
-            acknowledgedAt: attentionAcknowledgedAt
-        )
+        return false
     }
 
     private func elapsedText() -> String {
@@ -2935,7 +2958,7 @@ final class CodexMenuBarApp: NSObject, NSApplicationDelegate {
     }
 
     private var currentVersion: String {
-        Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "1.0.11"
+        Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "1.0.12"
     }
 
     private var buildDate: String {
