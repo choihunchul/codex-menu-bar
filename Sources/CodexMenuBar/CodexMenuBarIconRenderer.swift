@@ -112,33 +112,34 @@ final class CodexMenuBarIconRenderer {
         
         let hasAgDot = (effectiveAgStatus != nil)
         let hasCursorDot = (effectiveCursorStatus != nil)
-        let image = NSImage(size: Self.size)
-        image.isTemplate = !hasAgDot && !hasCursorDot && !hasUpdate
-        image.lockFocus()
-        defer { image.unlockFocus() }
+        
+        let image = NSImage(size: Self.size, flipped: false) { [weak self] rect in
+            guard let self = self else { return false }
+            NSGraphicsContext.current?.shouldAntialias = true
+            self.draw(
+                kind: kind,
+                color: (hasAgDot || hasCursorDot || hasUpdate) ? NSColor.labelColor : color,
+                frameIndex: frameIndex,
+                fiveHourUsagePercent: fiveHourUsagePercent,
+                weeklyUsagePercent: weeklyUsagePercent,
+                showTopRightSparkle: codexMenuBarTopRightSparkleShouldBlink(
+                    status: status,
+                    isRecentlyCompleted: isRecentlyCompleted
+                ),
+                hasUpdate: hasUpdate
+            )
 
-        NSGraphicsContext.current?.shouldAntialias = true
-        draw(
-            kind: kind,
-            color: (hasAgDot || hasCursorDot || hasUpdate) ? NSColor.labelColor : color,
-            frameIndex: frameIndex,
-            fiveHourUsagePercent: fiveHourUsagePercent,
-            weeklyUsagePercent: weeklyUsagePercent,
-            showTopRightSparkle: codexMenuBarTopRightSparkleShouldBlink(
-                status: status,
-                isRecentlyCompleted: isRecentlyCompleted
-            ),
-            hasUpdate: hasUpdate
-        )
-
-        if let effectiveAgStatus {
-            drawAgStatusDot(agStatus: effectiveAgStatus, frameIndex: frameIndex)
+            if let effectiveAgStatus {
+                self.drawAgStatusDot(agStatus: effectiveAgStatus, frameIndex: frameIndex)
+            }
+            
+            if let effectiveCursorStatus {
+                self.drawCursorStatusDot(cursorStatus: effectiveCursorStatus, frameIndex: frameIndex)
+            }
+            return true
         }
         
-        if let effectiveCursorStatus {
-            drawCursorStatusDot(cursorStatus: effectiveCursorStatus, frameIndex: frameIndex)
-        }
-
+        image.isTemplate = !hasAgDot && !hasCursorDot && !hasUpdate
         return image
     }
 
