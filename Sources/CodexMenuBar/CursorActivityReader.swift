@@ -86,7 +86,7 @@ final class CursorActivityReader: @unchecked Sendable {
                     guard let values = try? url.resourceValues(forKeys: [.contentModificationDateKey]),
                           let modDate = values.contentModificationDate else {
                         return nil
-                    }
+                      }
                     return (url, modDate)
                 })
                 .sorted(by: { $0.1 > $1.1 })
@@ -97,21 +97,42 @@ final class CursorActivityReader: @unchecked Sendable {
         
         var latestDate: Date? = nil
         for dir in dirsToScan {
-            guard let enumerator = fileManager.enumerator(
+            // Shallow scan the session directory to find window subdirectories
+            guard let windowContents = try? fileManager.contentsOfDirectory(
                 at: dir,
-                includingPropertiesForKeys: [.contentModificationDateKey],
+                includingPropertiesForKeys: nil,
                 options: [.skipsHiddenFiles]
             ) else {
                 continue
             }
             
-            for case let fileURL as URL in enumerator {
-                if fileURL.path.contains("anysphere.cursor-agent-exec"),
-                   fileURL.lastPathComponent.hasPrefix("Cursor Agent Exec") {
-                    if let values = try? fileURL.resourceValues(forKeys: [.contentModificationDateKey]),
-                       let modDate = values.contentModificationDate {
-                        if latestDate == nil || modDate > latestDate! {
-                            latestDate = modDate
+            for windowURL in windowContents {
+                guard windowURL.lastPathComponent.hasPrefix("window") else {
+                    continue
+                }
+                
+                let agentExecURL = windowURL.appendingPathComponent("exthost/anysphere.cursor-agent-exec")
+                var isDir: ObjCBool = false
+                guard fileManager.fileExists(atPath: agentExecURL.path, isDirectory: &isDir), isDir.boolValue else {
+                    continue
+                }
+                
+                // Shallow scan the agent exec directory
+                guard let files = try? fileManager.contentsOfDirectory(
+                    at: agentExecURL,
+                    includingPropertiesForKeys: [.contentModificationDateKey],
+                    options: [.skipsHiddenFiles]
+                ) else {
+                    continue
+                }
+                
+                for fileURL in files {
+                    if fileURL.lastPathComponent.hasPrefix("Cursor Agent Exec") {
+                        if let values = try? fileURL.resourceValues(forKeys: [.contentModificationDateKey]),
+                           let modDate = values.contentModificationDate {
+                            if latestDate == nil || modDate > latestDate! {
+                                latestDate = modDate
+                            }
                         }
                     }
                 }
