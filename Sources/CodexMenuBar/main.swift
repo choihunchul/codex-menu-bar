@@ -2939,7 +2939,7 @@ final class CodexMenuBarApp: NSObject, NSApplicationDelegate {
     }
 
     private var currentVersion: String {
-        Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "1.0.8"
+        Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "1.0.9"
     }
 
     private var buildDate: String {
