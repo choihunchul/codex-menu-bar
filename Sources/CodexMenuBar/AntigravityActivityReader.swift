@@ -27,7 +27,7 @@ struct AntigravityActivitySnapshot {
 ///
 /// Antigravity는 SQLite 기반 로그를 남기지 않으므로 토큰 카운팅은
 /// 불가하며, 파일 시스템 타임스탬프로만 활동 여부를 판단합니다.
-final class AntigravityActivityReader {
+final class AntigravityActivityReader: @unchecked Sendable {
     private let conversationsURL: URL
     private let fileManager: FileManager
 

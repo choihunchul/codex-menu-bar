@@ -260,7 +260,7 @@ final class LimitStateReader: @unchecked Sendable {
         modelsCacheFile = codexHome.appendingPathComponent("models_cache.json")
     }
 
-    private func getLogsModificationDate() -> Date? {
+    func getLogsModificationDate() -> Date? {
         guard let values = try? logsPath.resourceValues(forKeys: [.contentModificationDateKey]) else {
             return nil
         }
@@ -1689,6 +1689,20 @@ final class CodexMenuBarApp: NSObject, NSApplicationDelegate {
     private lazy var cursorLimitReader = CursorLimitReader(cursorHome: cursorHome)
     private lazy var antigravityActivityReader = AntigravityActivityReader(antigravityHome: antigravityHome)
 
+    // Throttling tracking
+    private var lastAntigravityCheck = Date.distantPast
+    private var lastCursorCheck = Date.distantPast
+    private var lastRuntimeSignalCheck = Date.distantPast
+    private var lastRuntimeSignalModDate: Date?
+    
+    // Async state locks
+    private var isRefreshingAntigravity = false
+    private var isRefreshingCursorSnapshot = false
+    private var isRefreshingRuntimeSignal = false
+    
+    // Cached background state
+    private var currentRuntimeSignalSnapshot: CodexRuntimeSignalSnapshot?
+
     // MARK: - Antigravity
     private var currentAntigravitySnapshot = AntigravityActivitySnapshot.empty
     private var latestAntigravityActivity: Date?
@@ -1937,6 +1951,7 @@ final class CodexMenuBarApp: NSObject, NSApplicationDelegate {
         refreshLimitStateIfNeeded()
         refreshAntigravitySnapshot()
         refreshCursorSnapshot()
+        refreshRuntimeSignalSnapshot()
         refreshCursorLimitStateIfNeeded()
         frameIndex = (frameIndex + 1) % frames.count
         updateMenuBarIcon()
@@ -1951,9 +1966,30 @@ final class CodexMenuBarApp: NSObject, NSApplicationDelegate {
             }
             return
         }
-        let snapshot = antigravityActivityReader.readSnapshot(activeWindowSeconds: settings.activeWindowSeconds)
-        currentAntigravitySnapshot = snapshot
-        latestAntigravityActivity = snapshot.lastActivityDate
+        let now = Date()
+        guard now.timeIntervalSince(lastAntigravityCheck) >= 3.0 else {
+            return
+        }
+        guard !isRefreshingAntigravity else {
+            return
+        }
+
+        isRefreshingAntigravity = true
+        lastAntigravityCheck = now
+        let reader = antigravityActivityReader
+        let activeWindowSecs = settings.activeWindowSeconds
+
+        DispatchQueue.global(qos: .background).async { [reader] in
+            let snapshot = reader.readSnapshot(activeWindowSeconds: activeWindowSecs)
+            Task { @MainActor [weak self] in
+                guard let self else { return }
+                self.currentAntigravitySnapshot = snapshot
+                self.latestAntigravityActivity = snapshot.lastActivityDate
+                self.isRefreshingAntigravity = false
+                self.updateMenuBarIcon()
+                self.updateMenu()
+            }
+        }
     }
 
     private func refreshCursorSnapshot() {
@@ -1964,9 +2000,63 @@ final class CodexMenuBarApp: NSObject, NSApplicationDelegate {
             }
             return
         }
-        let snapshot = cursorActivityReader.readSnapshot(activeWindowSeconds: settings.activeWindowSeconds)
-        currentCursorSnapshot = snapshot
-        latestCursorActivity = [snapshot.lastUserActivityDate, snapshot.lastAgentActivityDate].compactMap { $0 }.max()
+        let now = Date()
+        guard now.timeIntervalSince(lastCursorCheck) >= 3.0 else {
+            return
+        }
+        guard !isRefreshingCursorSnapshot else {
+            return
+        }
+
+        isRefreshingCursorSnapshot = true
+        lastCursorCheck = now
+        let reader = cursorActivityReader
+        let activeWindowSecs = settings.activeWindowSeconds
+
+        DispatchQueue.global(qos: .background).async { [reader] in
+            let snapshot = reader.readSnapshot(activeWindowSeconds: activeWindowSecs)
+            Task { @MainActor [weak self] in
+                guard let self else { return }
+                self.currentCursorSnapshot = snapshot
+                self.latestCursorActivity = [snapshot.lastUserActivityDate, snapshot.lastAgentActivityDate].compactMap { $0 }.max()
+                self.isRefreshingCursorSnapshot = false
+                self.updateMenuBarIcon()
+                self.updateMenu()
+            }
+        }
+    }
+
+    private func refreshRuntimeSignalSnapshot() {
+        guard settings.autoWatchEnabled else {
+            return
+        }
+        let now = Date()
+        guard now.timeIntervalSince(lastRuntimeSignalCheck) >= 3.0 else {
+            return
+        }
+        let modDate = limitStateReader.getLogsModificationDate()
+        guard modDate != lastRuntimeSignalModDate else {
+            return
+        }
+        guard !isRefreshingRuntimeSignal else {
+            return
+        }
+
+        isRefreshingRuntimeSignal = true
+        lastRuntimeSignalCheck = now
+        let reader = limitStateReader
+
+        DispatchQueue.global(qos: .background).async { [reader] in
+            let snapshot = reader.readRuntimeSignalSnapshot()
+            Task { @MainActor [weak self] in
+                guard let self else { return }
+                self.currentRuntimeSignalSnapshot = snapshot
+                self.lastRuntimeSignalModDate = modDate
+                self.isRefreshingRuntimeSignal = false
+                self.updateMenuBarIcon()
+                self.updateMenu()
+            }
+        }
     }
 
     private func refreshCursorLimitStateIfNeeded(force: Bool = false) {
@@ -2205,7 +2295,7 @@ final class CodexMenuBarApp: NSObject, NSApplicationDelegate {
         }
 
         if settings.autoWatchEnabled {
-            if let runtimeSnapshot = limitStateReader.readRuntimeSignalSnapshot(),
+            if let runtimeSnapshot = currentRuntimeSignalSnapshot,
                let runtimeKind = codexResolvedRuntimeStatus(from: runtimeSnapshot) {
                 let runtimeStatus = canonicalStatusText(for: runtimeKind)
                 let runtimeDetail = defaultDetail(for: runtimeStatus)
