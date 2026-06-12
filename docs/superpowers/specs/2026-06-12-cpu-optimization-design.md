@@ -5,17 +5,21 @@ Author: Antigravity
 
 ## Goal
 
-To resolve the high CPU usage of `CodexMenuBar` (nearly 100% CPU) and `WindowServer` (over 50% CPU) by optimizing filesystem traversals, migrating all disk/DB reads to background queues, and implementing dirty-state check caching to avoid redrawing the menu bar icon and updating the menus when there are no changes.
+To resolve the high CPU usage of `CodexMenuBar` (nearly 100% CPU) and `WindowServer` (over 50% CPU) by:
+1. Optimizing filesystem traversals to targeted paths (avoiding recursive walks).
+2. Offloading all disk/DB reads to a background thread with the lowest priority QoS (`.background`).
+3. Implementing throttling to limit disk/DB scans to run at most once every 3.0 seconds.
+4. Implementing dirty-state check caching to avoid redrawing the menu bar icon and updating the menus when there are no visual changes.
 
 ---
 
 ## 1. Directory Traversal Optimization (Cursor Logs)
 
 ### Problem
-In `CursorActivityReader.swift`, `findLatestAgentActivityDate()` scans the session subdirectory inside `~/Library/Application Support/Cursor/logs` using `fileManager.enumerator(at:dir...)` which recursively visits every subfolder and file (caches, workspace files, other extension data). This causes severe CPU and disk I/O load every 0.8 seconds.
+In `CursorActivityReader.swift`, `findLatestAgentActivityDate()` scans the session subdirectory inside `~/Library/Application Support/Cursor/logs` using `fileManager.enumerator(at:dir...)` which recursively visits every subfolder and file. This causes severe CPU and disk I/O load every 0.8 seconds.
 
 ### Solution
-Instead of recursive walk, we perform a target-focused shallow scan since the target log files are always at:
+Instead of recursive walk, perform a target-focused shallow scan since the target log files are always at:
 `logs/<session_id>/window<num>/exthost/anysphere.cursor-agent-exec/Cursor Agent Exec*`
 
 **Steps**:
@@ -26,23 +30,20 @@ Instead of recursive walk, we perform a target-focused shallow scan since the ta
 
 ---
 
-## 2. Background Thread Migration
+## 2. Background Thread Migration & QoS Throttling
 
 ### Problem
-Disk reads, file modification queries, and SQLite queries are executed synchronously on the main thread in `CodexMenuBarApp.refresh()` every 0.8 seconds:
-- `readPayload()` (reads and decodes `status.json` from disk).
-- `antigravityActivityReader.readSnapshot()` (shallow scans conversations directory and queries modification dates of all `.pb` files).
-- `cursorActivityReader.readSnapshot()` (scans logs directory).
-- `limitStateReader.readRuntimeSignalSnapshot()` (runs a SQLite query with unindexed `LIKE` patterns on the logs database).
+Disk reads, file modification queries, and SQLite queries are executed synchronously on the main thread in `CodexMenuBarApp.refresh()` every 0.8 seconds.
 
 ### Solution
 1. **Cache `readPayload()`**: Only re-read and decode `status.json` if its file modification date actually changes.
-2. **Asynchronous Snapshot Checks**:
-   - Run `antigravityActivityReader.readSnapshot()` on `DispatchQueue.global(qos: .utility)`.
-   - Run `cursorActivityReader.readSnapshot()` on `DispatchQueue.global(qos: .utility)`.
-   - Use boolean flags (`isRefreshingAntigravity`, `isRefreshingCursorSnapshot`) to prevent concurrent queued scans.
+2. **QoS `.background` & Throttling (3.0s)**:
+   - Run `antigravityActivityReader.readSnapshot()`, `cursorActivityReader.readSnapshot()`, and `limitStateReader.readRuntimeSignalSnapshot()` on a background queue with `.background` Quality of Service.
+   - On macOS/Apple Silicon, `.background` QoS runs code strictly on Efficiency Cores (E-cores) with restricted scheduling priority.
+   - Restrict these background checks so they are performed **at most once every 3.0 seconds** (even though the main refresh timer runs every 0.8 seconds to keep UI responsive).
+   - Use boolean flags (`isRefreshingAntigravity`, `isRefreshingCursorSnapshot`, `isRefreshingRuntimeSignal`) to prevent concurrent queued scans.
 3. **Asynchronous Runtime Signal SQLite Query**:
-   - Run `limitStateReader.readRuntimeSignalSnapshot()` asynchronously on the global utility queue when `logs_2.sqlite` is modified.
+   - Run `limitStateReader.readRuntimeSignalSnapshot()` asynchronously on the `.background` QoS queue.
    - Cache the resulting snapshot on `CodexMenuBarApp`.
 
 ---
