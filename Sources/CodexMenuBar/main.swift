@@ -158,10 +158,16 @@ struct LimitBucket {
     }
 }
 
+struct NamedLimitBucket {
+    var name: String
+    var bucket: LimitBucket
+}
+
 struct LimitState {
     var planType: String?
     var primary: LimitBucket?
     var secondary: LimitBucket?
+    var additionalLimits: [NamedLimitBucket]
     var observedAt: Date
     var source: String
 
@@ -169,6 +175,7 @@ struct LimitState {
         planType: nil,
         primary: nil,
         secondary: nil,
+        additionalLimits: [],
         observedAt: Date(),
         source: "none"
     )
@@ -178,6 +185,7 @@ private struct EventPayload: Decodable {
     var type: String
     var plan_type: String?
     var rate_limits: RatePayload?
+    var additional_rate_limits: [AdditionalRateLimitPayload]?
 }
 
 private struct AuthPayload: Decodable {
@@ -190,6 +198,12 @@ private struct AuthTokens: Decodable {
 
 private struct UsagePayload: Decodable {
     var plan_type: String?
+    var rate_limit: RatePayload?
+    var additional_rate_limits: [AdditionalRateLimitPayload]?
+}
+
+private struct AdditionalRateLimitPayload: Decodable {
+    var limit_name: String?
     var rate_limit: RatePayload?
 }
 
@@ -258,6 +272,58 @@ final class LimitStateReader: @unchecked Sendable {
             return live
         }
         return readLatestLog()
+    }
+
+    static func decodeLiveUsageState(from data: Data, observedAt: Date = Date()) -> LimitState? {
+        guard let payload = try? JSONDecoder().decode(UsagePayload.self, from: data) else {
+            return nil
+        }
+        let buckets = normalizedLimitBuckets(payload.rate_limit)
+        return LimitState(
+            planType: payload.plan_type,
+            primary: buckets.fiveHour,
+            secondary: buckets.weekly,
+            additionalLimits: normalizedAdditionalLimits(payload.additional_rate_limits),
+            observedAt: observedAt,
+            source: "live"
+        )
+    }
+
+    private static func normalizedLimitBuckets(
+        _ payload: RatePayload?
+    ) -> (fiveHour: LimitBucket?, weekly: LimitBucket?) {
+        let first = (payload?.primary ?? payload?.primary_window)?.toBucket()
+        let second = (payload?.secondary ?? payload?.secondary_window)?.toBucket()
+        let weeklyThresholdMinutes = 24.0 * 60.0
+
+        if let first, first.windowMinutes.map({ $0 >= weeklyThresholdMinutes }) == true {
+            if let second, second.windowMinutes.map({ $0 < weeklyThresholdMinutes }) == true {
+                return (second, first)
+            }
+            if second == nil {
+                return (nil, first)
+            }
+        }
+
+        return (first, second)
+    }
+
+    private static func normalizedAdditionalLimits(
+        _ payloads: [AdditionalRateLimitPayload]?
+    ) -> [NamedLimitBucket] {
+        (payloads ?? []).flatMap { payload in
+            let name = payload.limit_name?.trimmingCharacters(in: .whitespacesAndNewlines)
+            let displayName = name.flatMap { $0.isEmpty ? nil : $0 } ?? "Additional limit"
+            let buckets = normalizedLimitBuckets(payload.rate_limit)
+            var result: [NamedLimitBucket] = []
+            if let fiveHour = buckets.fiveHour {
+                result.append(NamedLimitBucket(name: "\(displayName) 5h", bucket: fiveHour))
+            }
+            if let weekly = buckets.weekly {
+                result.append(NamedLimitBucket(name: "\(displayName) weekly", bucket: weekly))
+            }
+            return result
+        }
     }
 
     func readCurrentModelName() -> String? {
@@ -515,18 +581,12 @@ final class LimitStateReader: @unchecked Sendable {
             let http = result.response as? HTTPURLResponse,
             (200..<300).contains(http.statusCode),
             let data = result.data,
-            let payload = try? decoder.decode(UsagePayload.self, from: data)
+            let state = Self.decodeLiveUsageState(from: data)
         else {
             return nil
         }
 
-        return LimitState(
-            planType: payload.plan_type,
-            primary: (payload.rate_limit?.primary ?? payload.rate_limit?.primary_window)?.toBucket(),
-            secondary: (payload.rate_limit?.secondary ?? payload.rate_limit?.secondary_window)?.toBucket(),
-            observedAt: Date(),
-            source: "live"
-        )
+        return state
     }
 
     private func readAccessToken() -> String? {
@@ -587,10 +647,12 @@ final class LimitStateReader: @unchecked Sendable {
             return .empty
         }
 
+        let buckets = Self.normalizedLimitBuckets(payload.rate_limits)
         let result = LimitState(
             planType: payload.plan_type,
-            primary: (payload.rate_limits?.primary ?? payload.rate_limits?.primary_window)?.toBucket(),
-            secondary: (payload.rate_limits?.secondary ?? payload.rate_limits?.secondary_window)?.toBucket(),
+            primary: buckets.fiveHour,
+            secondary: buckets.weekly,
+            additionalLimits: Self.normalizedAdditionalLimits(payload.additional_rate_limits),
             observedAt: Date(),
             source: "cached"
         )
@@ -703,6 +765,7 @@ private final class UsageSummaryCardView: NSView {
     private let graphView = TokenUsageGraphView()
     private let fiveHourLimitView = LimitUsageBarView()
     private let weeklyLimitView = LimitUsageBarView()
+    private var additionalLimitViews: [LimitUsageBarView] = []
     private let todayUsageView = UsageMetricBlockView()
     private let weekUsageView = UsageMetricBlockView()
 
@@ -882,6 +945,7 @@ private final class UsageSummaryCardView: NSView {
             weeklyTokens: weeklyTokens,
             fiveHourLimit: nil,
             weeklyLimit: nil,
+            additionalLimits: [],
             bucketWindowEnd: Date(),
             modelName: nil,
             contextWindow: contextWindow,
@@ -899,6 +963,7 @@ private final class UsageSummaryCardView: NSView {
         weeklyTokens: Int,
         fiveHourLimit: LimitBucket?,
         weeklyLimit: LimitBucket?,
+        additionalLimits: [NamedLimitBucket],
         bucketWindowEnd: Date,
         modelName: String?,
         contextWindow: Int?,
@@ -934,8 +999,28 @@ private final class UsageSummaryCardView: NSView {
             bucket: weeklyLimit,
             tokenText: formatTokenCount(weeklyTokens)
         )
+        updateAdditionalLimitViews(additionalLimits)
         needsLayout = true
         needsDisplay = true
+    }
+
+    private func updateAdditionalLimitViews(_ limits: [NamedLimitBucket]) {
+        while additionalLimitViews.count < limits.count {
+            let view = LimitUsageBarView()
+            additionalLimitViews.append(view)
+            codexPanel.addSubview(view)
+        }
+        while additionalLimitViews.count > limits.count {
+            additionalLimitViews.removeLast().removeFromSuperview()
+        }
+        for (view, limit) in zip(additionalLimitViews, limits) {
+            view.update(title: limit.name, bucket: limit.bucket, tokenText: nil)
+        }
+
+        let targetHeight = 268 + CGFloat(limits.count * 28)
+        if frame.height != targetHeight {
+            setFrameSize(NSSize(width: frame.width, height: targetHeight))
+        }
     }
 
     // MARK: - Antigravity update
@@ -1121,6 +1206,10 @@ private final class UsageSummaryCardView: NSView {
         fiveHourLimitView.frame = NSRect(x: leftX, y: leftTop - 22, width: leftWidth, height: 22)
         leftTop -= 28
         weeklyLimitView.frame = NSRect(x: leftX, y: leftTop - 22, width: leftWidth, height: 22)
+        for view in additionalLimitViews {
+            leftTop -= 28
+            view.frame = NSRect(x: leftX, y: leftTop - 22, width: leftWidth, height: 22)
+        }
 
         todayUsageView.frame = NSRect(x: rightX, y: rightTop - 70, width: rightWidth, height: 64)
         rightTop -= 84
@@ -2562,6 +2651,7 @@ final class CodexMenuBarApp: NSObject, NSApplicationDelegate {
             weeklyTokens: currentTokenUsageStats.weekTotal,
             fiveHourLimit: currentLimitState.primary,
             weeklyLimit: currentLimitState.secondary,
+            additionalLimits: currentLimitState.additionalLimits,
             bucketWindowEnd: currentTokenUsageStats.observedAt,
             modelName: currentPayload?.model ?? currentModelName,
             contextWindow: currentPayload?.contextWindow ?? currentContextWindow,
@@ -2881,7 +2971,7 @@ final class CodexMenuBarApp: NSObject, NSApplicationDelegate {
     }
 
     private var currentVersion: String {
-        Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "1.0.12"
+        Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "1.0.13"
     }
 
     private var buildDate: String {
