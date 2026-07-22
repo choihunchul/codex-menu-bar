@@ -19,7 +19,10 @@ let package = Package(
         ),
         .testTarget(
             name: "CodexMenuBarTests",
-            dependencies: ["CodexMenuBar"]
+            dependencies: ["CodexMenuBar"],
+            linkerSettings: [
+                .linkedLibrary("sqlite3")
+            ]
         )
     ]
 )

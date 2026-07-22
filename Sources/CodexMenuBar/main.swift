@@ -245,8 +245,10 @@ final class LimitStateReader: @unchecked Sendable {
 
     // Thread-safe Cache Storage
     private let lock = NSLock()
-    private var cachedRuntimeSignalSnapshotDate: Date?
     private var cachedRuntimeSignalSnapshot: CodexRuntimeSignalSnapshot?
+    private var runtimeSignalLastRowID: Int64?
+    private var runtimeSignalInitialized = false
+    private(set) var runtimeSignalRowsReadForLastRefresh = 0
     private var cachedTokenUsageStatsDate: Date?
     private var cachedTokenUsageStats: TokenUsageSummary?
     private var cachedModelNameDate: Date?
@@ -443,14 +445,6 @@ final class LimitStateReader: @unchecked Sendable {
     }
 
     func readRuntimeSignalSnapshot() -> CodexRuntimeSignalSnapshot? {
-        let modDate = getLogsModificationDate()
-        lock.lock()
-        if let cachedDate = cachedRuntimeSignalSnapshotDate, let cached = cachedRuntimeSignalSnapshot, modDate == cachedDate {
-            lock.unlock()
-            return cached
-        }
-        lock.unlock()
-
         guard FileManager.default.fileExists(atPath: logsPath.path) else {
             return nil
         }
@@ -461,60 +455,94 @@ final class LimitStateReader: @unchecked Sendable {
         }
         defer { sqlite3_close(db) }
 
-        let sql = """
-        SELECT ts, ts_nanos, feedback_log_body
-        FROM logs
-        WHERE feedback_log_body LIKE '%"status":"in_progress"%'
-           OR feedback_log_body LIKE '%"status":"completed"%'
-           OR feedback_log_body LIKE '%"status":"failed"%'
-           OR feedback_log_body LIKE '%"status":"error"%'
-           OR feedback_log_body LIKE '%response.created%'
-           OR feedback_log_body LIKE '%response.completed%'
-           OR feedback_log_body LIKE '%response.output_item.added%'
-           OR feedback_log_body LIKE '%response.output_item.done%'
-           OR feedback_log_body LIKE '%approval_required%'
-           OR feedback_log_body LIKE '%awaiting approval%'
-           OR feedback_log_body LIKE '%waiting for input%'
-           OR feedback_log_body LIKE '%new message%'
-        ORDER BY ts DESC, ts_nanos DESC, id DESC
-        LIMIT 500
-        """
+        var maximumRowIDStatement: OpaquePointer?
+        guard sqlite3_prepare_v2(db, "SELECT COALESCE(MAX(id), 0) FROM logs", -1, &maximumRowIDStatement, nil) == SQLITE_OK,
+              let maximumRowIDStatement else {
+            return nil
+        }
+        defer { sqlite3_finalize(maximumRowIDStatement) }
+        guard sqlite3_step(maximumRowIDStatement) == SQLITE_ROW else {
+            return nil
+        }
+        let maximumRowID = sqlite3_column_int64(maximumRowIDStatement, 0)
+
+        lock.lock()
+        var lastRowID = runtimeSignalLastRowID
+        var snapshot = cachedRuntimeSignalSnapshot ?? CodexRuntimeSignalSnapshot(
+            runningAt: nil,
+            approvalAt: nil,
+            completedAt: nil,
+            waitingAt: nil,
+            messageAt: nil,
+            errorAt: nil
+        )
+        var isInitialized = runtimeSignalInitialized
+        lock.unlock()
+
+        if isInitialized, maximumRowID < (lastRowID ?? 0) {
+            lastRowID = nil
+            isInitialized = false
+            snapshot = CodexRuntimeSignalSnapshot(
+                runningAt: nil,
+                approvalAt: nil,
+                completedAt: nil,
+                waitingAt: nil,
+                messageAt: nil,
+                errorAt: nil
+            )
+        }
+
+        let sql: String
+        if isInitialized {
+            sql = """
+            SELECT id, ts, ts_nanos, feedback_log_body
+            FROM logs
+            WHERE id > ?
+            ORDER BY id ASC
+            """
+        } else {
+            sql = """
+            SELECT id, ts, ts_nanos, feedback_log_body
+            FROM logs
+            ORDER BY id DESC
+            LIMIT 500
+            """
+        }
 
         var statement: OpaquePointer?
         guard sqlite3_prepare_v2(db, sql, -1, &statement, nil) == SQLITE_OK, let statement else {
             return nil
         }
         defer { sqlite3_finalize(statement) }
+        if isInitialized {
+            sqlite3_bind_int64(statement, 1, lastRowID ?? 0)
+        }
 
-        var snapshot = CodexRuntimeSignalSnapshot(runningAt: nil, approvalAt: nil, completedAt: nil, waitingAt: nil, messageAt: nil, errorAt: nil)
+        var rowsRead = 0
+        var newestRowID = lastRowID ?? 0
 
         while sqlite3_step(statement) == SQLITE_ROW {
-            let ts = sqlite3_column_double(statement, 0)
-            let tsNanos = sqlite3_column_int64(statement, 1)
+            let rowID = sqlite3_column_int64(statement, 0)
+            let ts = sqlite3_column_double(statement, 1)
+            let tsNanos = sqlite3_column_int64(statement, 2)
             let date = codexLogDate(seconds: ts, nanoseconds: tsNanos)
-            guard let cText = sqlite3_column_text(statement, 2) else {
+            rowsRead += 1
+            newestRowID = max(newestRowID, rowID)
+            guard let cText = sqlite3_column_text(statement, 3) else {
                 continue
             }
             let body = String(cString: cText)
 
             codexRecordRuntimeSignal(from: body, at: date, into: &snapshot)
-
-            if snapshot.runningAt != nil
-                && snapshot.completedAt != nil
-                && snapshot.approvalAt != nil
-                && snapshot.waitingAt != nil
-                && snapshot.messageAt != nil
-                && snapshot.errorAt != nil
-            {
-                break
-            }
         }
 
         let result = (snapshot.runningAt != nil || snapshot.approvalAt != nil || snapshot.completedAt != nil || snapshot.waitingAt != nil || snapshot.messageAt != nil || snapshot.errorAt != nil) ? snapshot : nil
 
         lock.lock()
-        cachedRuntimeSignalSnapshotDate = modDate
         cachedRuntimeSignalSnapshot = result
+        runtimeSignalLastRowID = max(newestRowID, maximumRowID)
+        runtimeSignalInitialized = true
+        runtimeSignalRowsReadForLastRefresh = rowsRead
         lock.unlock()
 
         return result
@@ -524,36 +552,38 @@ final class LimitStateReader: @unchecked Sendable {
         if (body.contains("\"status\":\"in_progress\"")
             || body.contains("response.created")
             || body.contains("response.output_item.added"))
-            && snapshot.runningAt == nil
         {
-            snapshot.runningAt = date
+            codexRecordLatest(date, into: &snapshot.runningAt)
         }
         if (body.contains("\"status\":\"completed\"")
             || body.contains("response.completed")
             || body.contains("response.output_item.done"))
-            && snapshot.completedAt == nil
         {
-            snapshot.completedAt = date
+            codexRecordLatest(date, into: &snapshot.completedAt)
         }
         if (body.contains("approval_required")
             || body.contains("awaiting approval")
             || body.contains("waiting for input"))
-            && snapshot.approvalAt == nil
         {
-            snapshot.approvalAt = date
+            codexRecordLatest(date, into: &snapshot.approvalAt)
         }
-        if body.contains("new message"), snapshot.messageAt == nil {
-            snapshot.messageAt = date
+        if body.contains("new message") {
+            codexRecordLatest(date, into: &snapshot.messageAt)
         }
         if (body.contains("\"status\":\"failed\"")
             || body.contains("\"status\":\"error\"")
             || body.contains("failed"))
-            && snapshot.errorAt == nil
         {
-            snapshot.errorAt = date
+            codexRecordLatest(date, into: &snapshot.errorAt)
         }
-        if body.contains("waiting") && snapshot.waitingAt == nil {
-            snapshot.waitingAt = date
+        if body.contains("waiting") {
+            codexRecordLatest(date, into: &snapshot.waitingAt)
+        }
+    }
+
+    private func codexRecordLatest(_ date: Date, into recordedDate: inout Date?) {
+        if recordedDate.map({ date > $0 }) ?? true {
+            recordedDate = date
         }
     }
 
