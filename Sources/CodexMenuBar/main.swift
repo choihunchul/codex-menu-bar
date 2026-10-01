@@ -1031,12 +1031,12 @@ private final class UsageSummaryCardView: NSView {
         fiveHourLimitView.update(
             title: "5h limit",
             bucket: fiveHourLimit,
-            tokenText: formatTokenCount(fiveHourTokens)
+            tokenText: codexLimitUsageText(fiveHourTokens, bucket: fiveHourLimit)
         )
         weeklyLimitView.update(
             title: "Weekly limit",
             bucket: weeklyLimit,
-            tokenText: formatTokenCount(weeklyTokens)
+            tokenText: codexLimitUsageText(weeklyTokens, bucket: weeklyLimit)
         )
         updateAdditionalLimitViews(additionalLimits)
         needsLayout = true
@@ -1113,7 +1113,7 @@ private final class UsageSummaryCardView: NSView {
                 .replacingOccurrences(of: "Claude and GPT models", with: "Claude / GPT")
             agLimitViews[index].update(title: title, bucket: limit.bucket, tokenText: nil)
             agResetLabels[index].stringValue = limit.bucket.resetAt.map {
-                "Resets \(quotaDateText(Date(timeIntervalSince1970: $0)))"
+                "Resets \(quotaResetText(Date(timeIntervalSince1970: $0)))"
             } ?? "Reset time unavailable"
         }
         let hasLimits = !limits.isEmpty
@@ -1182,7 +1182,7 @@ private final class UsageSummaryCardView: NSView {
             cursorTotalLimitView.update(title: "Monthly included", bucket: totalBucket, tokenText: nil)
             cursorSpendLabel.stringValue = cursorIncludedUsageText(limitState)
             cursorTokensLabel.stringValue = "On-demand: \(quotaMoneyText(limitState.onDemandSpendUSD))" +
-                (limitState.billingCycleEnd.map { " · Resets \(quotaDateText($0))" } ?? "")
+                (limitState.billingCycleEnd.map { " · Resets \(quotaResetText($0))" } ?? "")
             cursorTokensLabel.toolTip = "Included and bonus usage are separate from on-demand charges."
             if limitState.isStale {
                 cursorLastActivityLabel.stringValue = "Quotas updated: \(quotaDateText(limitState.observedAt)) (cached)"
@@ -2872,7 +2872,7 @@ final class CodexMenuBarApp: NSObject, NSApplicationDelegate {
             let quotaText: String
             if currentCursorLimitState.source == "live" {
                 let totalUsed = currentCursorLimitState.totalPercentUsed.map { String(format: "%.1f%% used", $0) } ?? "-"
-                let reset = currentCursorLimitState.billingCycleEnd.map { " | resets \(quotaDateText($0))" } ?? ""
+                let reset = currentCursorLimitState.billingCycleEnd.map { " | resets \(quotaResetText($0))" } ?? ""
                 quotaText = "\(totalUsed) | \(cursorIncludedUsageText(currentCursorLimitState))\(reset)" + (currentCursorLimitState.isStale ? " (cached)" : "")
             } else {
                 quotaText = "No quota data"
