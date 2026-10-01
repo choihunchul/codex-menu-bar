@@ -9,6 +9,10 @@ struct CursorLimitState: Sendable {
     var limitUSD: Double?
     var totalTokens: Int?
     var totalRequests: Int?
+    var bonusSpendUSD: Double? = nil
+    var onDemandSpendUSD: Double? = nil
+    var billingCycleEnd: Date? = nil
+    var isStale = false
     var observedAt: Date
     var source: String
     
@@ -27,9 +31,34 @@ struct CursorLimitState: Sendable {
 
 final class CursorLimitReader: @unchecked Sendable {
     private let globalStoragePath: URL
-    private let liveUsageURL = URL(string: "https://cursor.com/api/dashboard/get-current-period-usage")!
+    private let liveUsageURL = URL(string: "https://cursor.com/api/usage-summary")!
     private let tokenUsageURL = URL(string: "https://cursor.com/api/usage")!
     private let decoder = JSONDecoder()
+    private let lock = NSLock()
+    private var suspended = false
+    private var activeTasks: [URLSessionDataTask] = []
+
+    func setSuspended(_ value: Bool) {
+        lock.lock()
+        suspended = value
+        let tasks = value ? activeTasks : []
+        lock.unlock()
+        tasks.forEach { $0.cancel() }
+    }
+
+    private func startTask(_ request: URLRequest, result: URLResultBox, semaphore: DispatchSemaphore) -> Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        guard !suspended else { return false }
+        let task = URLSession.shared.dataTask(with: request) { data, response, _ in
+            result.data = data
+            result.response = response
+            semaphore.signal()
+        }
+        activeTasks.append(task)
+        task.resume()
+        return true
+    }
 
     init(cursorHome: URL) {
         globalStoragePath = cursorHome.appendingPathComponent("User/globalStorage/state.vscdb")
@@ -81,46 +110,35 @@ final class CursorLimitReader: @unchecked Sendable {
     }
     
     func readLiveUsage() -> CursorLimitState? {
+        defer {
+            lock.lock()
+            activeTasks.removeAll()
+            lock.unlock()
+        }
         guard let token = readAccessToken(), let userId = parseUserId(from: token) else {
             return nil
         }
         
         let cookieValue = "\(userId)::\(token)"
         
-        // Fetch plan usage (POST)
+        // Read the dashboard summary; amounts are cents, percentages are 0...100.
         var request = URLRequest(url: liveUsageURL)
-        request.httpMethod = "POST"
+        request.httpMethod = "GET"
         request.timeoutInterval = 6.0
         request.setValue("WorkosCursorSessionToken=\(cookieValue)", forHTTPHeaderField: "Cookie")
         request.setValue("https://cursor.com", forHTTPHeaderField: "Origin")
         request.setValue("https://cursor.com/settings", forHTTPHeaderField: "Referer")
         
-        struct ResponsePayload: Decodable {
-            struct PlanUsage: Decodable {
-                let totalSpend: Double?
-                let includedSpend: Double?
-                let limit: Double?
-                let apiPercentUsed: Double?
-                let totalPercentUsed: Double?
-            }
-            let planUsage: PlanUsage?
-        }
-        
         let semaphore = DispatchSemaphore(value: 0)
         let result = URLResultBox()
         
-        URLSession.shared.dataTask(with: request) { data, response, _ in
-            result.data = data
-            result.response = response
-            semaphore.signal()
-        }.resume()
+        guard startTask(request, result: result, semaphore: semaphore) else { return nil }
         
         guard semaphore.wait(timeout: .now() + 7.0) == .success,
               let http = result.response as? HTTPURLResponse,
               (200..<300).contains(http.statusCode),
               let data = result.data,
-              let payload = try? decoder.decode(ResponsePayload.self, from: data),
-              let plan = payload.planUsage else {
+              let state = Self.decodeUsageSummary(from: data) else {
             return nil
         }
         
@@ -132,11 +150,7 @@ final class CursorLimitReader: @unchecked Sendable {
         
         let getSemaphore = DispatchSemaphore(value: 0)
         let getResult = URLResultBox()
-        URLSession.shared.dataTask(with: getRequest) { data, response, _ in
-            getResult.data = data
-            getResult.response = response
-            getSemaphore.signal()
-        }.resume()
+        guard startTask(getRequest, result: getResult, semaphore: getSemaphore) else { return nil }
         
         var totalTokens = 0
         var totalRequests = 0
@@ -159,16 +173,56 @@ final class CursorLimitReader: @unchecked Sendable {
             }
         }
         
+        var resultState = state
+        resultState.totalTokens = totalTokens > 0 ? totalTokens : nil
+        resultState.totalRequests = totalRequests > 0 ? totalRequests : nil
+        return resultState
+    }
+
+    static func decodeUsageSummary(from data: Data, observedAt: Date = Date()) -> CursorLimitState? {
+        guard let payload = try? JSONDecoder().decode(CursorUsageSummary.self, from: data),
+              let plan = payload.individualUsage?.plan else { return nil }
+        let derivedPercent = plan.used.flatMap { used in
+            plan.limit.flatMap { $0 > 0 ? Double(used) / Double($0) * 100 : nil }
+        }
         return CursorLimitState(
             apiPercentUsed: plan.apiPercentUsed,
-            totalPercentUsed: plan.totalPercentUsed,
-            totalSpendUSD: plan.totalSpend.map { $0 / 100.0 },
-            includedSpendUSD: plan.includedSpend.map { $0 / 100.0 },
-            limitUSD: plan.limit.map { $0 / 100.0 },
-            totalTokens: totalTokens > 0 ? totalTokens : nil,
-            totalRequests: totalRequests > 0 ? totalRequests : nil,
-            observedAt: Date(),
+            totalPercentUsed: plan.totalPercentUsed ?? derivedPercent,
+            totalSpendUSD: plan.breakdown?.total.map { Double($0) / 100 },
+            includedSpendUSD: plan.used.map { Double($0) / 100 },
+            limitUSD: plan.limit.map { Double($0) / 100 },
+            totalTokens: nil,
+            totalRequests: nil,
+            bonusSpendUSD: plan.breakdown?.bonus.map { Double($0) / 100 },
+            onDemandSpendUSD: payload.individualUsage?.onDemand?.used.map { Double($0) / 100 },
+            billingCycleEnd: payload.billingCycleEnd.flatMap { value in
+                let formatter = ISO8601DateFormatter()
+                formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+                return formatter.date(from: value) ?? ISO8601DateFormatter().date(from: value)
+            },
+            observedAt: observedAt,
             source: "live"
         )
     }
+}
+
+private struct CursorUsageSummary: Decodable {
+    var billingCycleEnd: String?
+    var individualUsage: IndividualUsage?
+    struct IndividualUsage: Decodable {
+        var plan: Plan?
+        var onDemand: OnDemand?
+    }
+    struct Plan: Decodable {
+        var used: Int?
+        var limit: Int?
+        var apiPercentUsed: Double?
+        var totalPercentUsed: Double?
+        var breakdown: Breakdown?
+    }
+    struct Breakdown: Decodable {
+        var total: Int?
+        var bonus: Int?
+    }
+    struct OnDemand: Decodable { var used: Int? }
 }

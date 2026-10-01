@@ -168,6 +168,7 @@ struct LimitState {
     var primary: LimitBucket?
     var secondary: LimitBucket?
     var additionalLimits: [NamedLimitBucket]
+    var resetCreditsAvailableCount: Int? = nil
     var observedAt: Date
     var source: String
 
@@ -200,6 +201,11 @@ private struct UsagePayload: Decodable {
     var plan_type: String?
     var rate_limit: RatePayload?
     var additional_rate_limits: [AdditionalRateLimitPayload]?
+    var rate_limit_reset_credits: ResetCreditsPayload?
+}
+
+private struct ResetCreditsPayload: Decodable {
+    var available_count: Int?
 }
 
 private struct AdditionalRateLimitPayload: Decodable {
@@ -286,6 +292,7 @@ final class LimitStateReader: @unchecked Sendable {
             primary: buckets.fiveHour,
             secondary: buckets.weekly,
             additionalLimits: normalizedAdditionalLimits(payload.additional_rate_limits),
+            resetCreditsAvailableCount: payload.rate_limit_reset_credits?.available_count,
             observedAt: observedAt,
             source: "live"
         )
@@ -817,6 +824,8 @@ private final class UsageSummaryCardView: NSView {
     private let agActiveConvLabel = UsageSummaryCardView.makeLabel(font: .systemFont(ofSize: 13, weight: .regular), color: .labelColor)
     private let agTotalConvLabel = UsageSummaryCardView.makeLabel(font: .systemFont(ofSize: 11, weight: .regular), color: .secondaryLabelColor)
     private let agActivityBar = LimitUsageBarView()
+    private var agLimitViews: [LimitUsageBarView] = []
+    private var agResetLabels: [NSTextField] = []
 
     override init(frame frameRect: NSRect) {
         super.init(frame: NSRect(x: 0, y: 0, width: 520, height: 268))
@@ -1047,7 +1056,7 @@ private final class UsageSummaryCardView: NSView {
             view.update(title: limit.name, bucket: limit.bucket, tokenText: nil)
         }
 
-        let targetHeight = 268 + CGFloat(limits.count * 28)
+        let targetHeight = max(268 + CGFloat(limits.count * 28), agLimitViews.isEmpty ? 268 : 150 + CGFloat(agLimitViews.count * 44))
         if frame.height != targetHeight {
             setFrameSize(NSSize(width: frame.width, height: targetHeight))
         }
@@ -1057,6 +1066,7 @@ private final class UsageSummaryCardView: NSView {
 
     func updateAntigravity(
         snapshot: AntigravityActivitySnapshot,
+        limitState: AntigravityLimitState,
         activeWindowSeconds: TimeInterval,
         now: Date = Date()
     ) {
@@ -1084,6 +1094,41 @@ private final class UsageSummaryCardView: NSView {
 
         agActiveConvLabel.stringValue = "Active conversations: \(snapshot.activeConversationCount)"
         agTotalConvLabel.stringValue = "Total conversations: \(snapshot.totalConversationCount)"
+
+        let limits = limitState.limits
+        while agLimitViews.count < limits.count {
+            let view = LimitUsageBarView()
+            let label = Self.makeLabel(font: .systemFont(ofSize: 11), color: .secondaryLabelColor)
+            agLimitViews.append(view)
+            agResetLabels.append(label)
+            agPanel.addSubview(view)
+            agPanel.addSubview(label)
+        }
+        while agLimitViews.count > limits.count {
+            agLimitViews.removeLast().removeFromSuperview()
+            agResetLabels.removeLast().removeFromSuperview()
+        }
+        for (index, limit) in limits.enumerated() {
+            let title = limit.name.replacingOccurrences(of: "Gemini Models", with: "Gemini")
+                .replacingOccurrences(of: "Claude and GPT models", with: "Claude / GPT")
+            agLimitViews[index].update(title: title, bucket: limit.bucket, tokenText: nil)
+            agResetLabels[index].stringValue = limit.bucket.resetAt.map {
+                "Resets \(quotaDateText(Date(timeIntervalSince1970: $0)))"
+            } ?? "Reset time unavailable"
+        }
+        let hasLimits = !limits.isEmpty
+        agActiveConvLabel.isHidden = hasLimits
+        agTotalConvLabel.isHidden = hasLimits
+        agActivityBar.isHidden = hasLimits
+        if hasLimits {
+            agLastActivityLabel.stringValue = "Quotas updated: \(quotaDateText(limitState.observedAt))" + (limitState.isStale ? " (cached)" : "")
+        } else {
+            agTotalConvLabel.stringValue = "Limits unavailable (requires signed-in agy CLI)"
+        }
+        let targetHeight = max(268 + CGFloat(additionalLimitViews.count * 28), hasLimits ? 150 + CGFloat(limits.count * 44) : 268)
+        if frame.height != targetHeight {
+            setFrameSize(NSSize(width: frame.width, height: targetHeight))
+        }
 
         // Activity bar: ratio of active to total, capped at 1
         let ratio = snapshot.totalConversationCount > 0
@@ -1130,36 +1175,25 @@ private final class UsageSummaryCardView: NSView {
         }
 
         if limitState.source == "live" {
-            let apiPercent = limitState.apiPercentUsed ?? 0.0
-            let totalPercent = limitState.totalPercentUsed ?? 0.0
-            
-            cursorAPILimitView.updateRaw(
-                title: String(format: "API Limit: %.1f%% used", apiPercent),
-                usedPercent: apiPercent,
-                color: apiPercent >= 80.0 ? .systemRed : (apiPercent >= 50.0 ? .systemOrange : .systemCyan)
-            )
-            
-            cursorTotalLimitView.updateRaw(
-                title: String(format: "Total Limit: %.1f%% used", totalPercent),
-                usedPercent: totalPercent,
-                color: totalPercent >= 80.0 ? .systemRed : (totalPercent >= 50.0 ? .systemOrange : .systemGreen)
-            )
-            
-            let spend = limitState.totalSpendUSD.map { String(format: "$%.2f", $0) } ?? "-"
-            let limit = limitState.limitUSD.map { String(format: "$%.2f", $0) } ?? "-"
-            let included = limitState.includedSpendUSD.map { String(format: "$%.2f", $0) } ?? "-"
-            cursorSpendLabel.stringValue = "Spend: \(spend) / \(limit) (Included: \(included))"
-            
-            let tokens = limitState.totalTokens.map { formatTokenCount($0) } ?? "-"
-            let requests = limitState.totalRequests.map { "\($0) reqs" } ?? "-"
-            cursorTokensLabel.stringValue = "Tokens: \(tokens) (\(requests))"
+            let reset = limitState.billingCycleEnd?.timeIntervalSince1970
+            let apiBucket = limitState.apiPercentUsed.map { LimitBucket(usedPercent: $0, resetAt: reset) }
+            let totalBucket = limitState.totalPercentUsed.map { LimitBucket(usedPercent: $0, resetAt: reset) }
+            cursorAPILimitView.update(title: "API models", bucket: apiBucket, tokenText: nil)
+            cursorTotalLimitView.update(title: "Monthly included", bucket: totalBucket, tokenText: nil)
+            cursorSpendLabel.stringValue = cursorIncludedUsageText(limitState)
+            cursorTokensLabel.stringValue = "On-demand: \(quotaMoneyText(limitState.onDemandSpendUSD))" +
+                (limitState.billingCycleEnd.map { " · Resets \(quotaDateText($0))" } ?? "")
+            cursorTokensLabel.toolTip = "Included and bonus usage are separate from on-demand charges."
+            if limitState.isStale {
+                cursorLastActivityLabel.stringValue = "Quotas updated: \(quotaDateText(limitState.observedAt)) (cached)"
+            }
         } else {
-            cursorAPILimitView.updateRaw(title: "API Limit: -", usedPercent: 0.0, color: .secondaryLabelColor)
-            cursorTotalLimitView.updateRaw(title: "Total Limit: -", usedPercent: 0.0, color: .secondaryLabelColor)
-            cursorSpendLabel.stringValue = "Spend: -"
-            cursorTokensLabel.stringValue = "Tokens: -"
+            cursorAPILimitView.update(title: "API models", bucket: nil, tokenText: nil)
+            cursorTotalLimitView.update(title: "Monthly included", bucket: nil, tokenText: nil)
+            cursorSpendLabel.stringValue = "Included usage: unavailable"
+            cursorTokensLabel.stringValue = "Limits require Cursor sign-in"
         }
-        
+
         needsLayout = true
         needsDisplay = true
     }
@@ -1275,6 +1309,15 @@ private final class UsageSummaryCardView: NSView {
         top -= 22
         agLastActivityLabel.frame = NSRect(x: inset, y: top - 16, width: contentWidth, height: 16)
         top -= 22
+        if !agLimitViews.isEmpty {
+            for (view, label) in zip(agLimitViews, agResetLabels) {
+                view.frame = NSRect(x: inset, y: top - 22, width: contentWidth, height: 22)
+                top -= 26
+                label.frame = NSRect(x: inset, y: top - 14, width: contentWidth, height: 14)
+                top -= 18
+            }
+            return
+        }
         agActiveConvLabel.frame = NSRect(x: inset, y: top - 16, width: contentWidth, height: 16)
         top -= 22
         agTotalConvLabel.frame = NSRect(x: inset, y: top - 14, width: contentWidth, height: 14)
@@ -1775,6 +1818,7 @@ final class CodexMenuBarApp: NSObject, NSApplicationDelegate {
     private var weeklyLimitField: NSTextField?
     private var fiveHourLimitField: NSTextField?
     private let usageSummaryView = UsageSummaryCardView()
+    private let resetCreditsMenuItem = NSMenuItem(title: "Reset credits: -", action: nil, keyEquivalent: "")
     private let statusPopover = NSPopover()
     private let statusPopupViewController = StatusPopupViewController()
     private var lastPopupStatus: String?
@@ -1806,6 +1850,7 @@ final class CodexMenuBarApp: NSObject, NSApplicationDelegate {
     private lazy var limitStateReader = LimitStateReader(codexHome: codexHome)
     private lazy var cursorActivityReader = CursorActivityReader(cursorHome: cursorHome)
     private lazy var cursorLimitReader = CursorLimitReader(cursorHome: cursorHome)
+    private let antigravityLimitReader = AntigravityLimitReader()
     private lazy var antigravityActivityReader = AntigravityActivityReader(antigravityHome: antigravityHome)
 
     // Throttling tracking
@@ -1823,6 +1868,10 @@ final class CodexMenuBarApp: NSObject, NSApplicationDelegate {
     private var currentRuntimeSignalSnapshot: CodexRuntimeSignalSnapshot?
 
     // MARK: - Antigravity
+    private var currentAntigravityLimitState = AntigravityLimitState.empty
+    private var lastAntigravityLimitRefresh = Date.distantPast
+    private var isRefreshingAntigravityLimits = false
+    private var isSystemSleeping = false
     private var currentAntigravitySnapshot = AntigravityActivitySnapshot.empty
     private var latestAntigravityActivity: Date?
 
@@ -1909,6 +1958,12 @@ final class CodexMenuBarApp: NSObject, NSApplicationDelegate {
             object: nil
         )
         configureMenu()
+        NSWorkspace.shared.notificationCenter.addObserver(
+            self, selector: #selector(systemWillSleep(_:)), name: NSWorkspace.willSleepNotification, object: nil
+        )
+        NSWorkspace.shared.notificationCenter.addObserver(
+            self, selector: #selector(systemDidWake(_:)), name: NSWorkspace.didWakeNotification, object: nil
+        )
         refresh()
         scheduleTimer()
         scheduleAnimationTimerIfNeeded()
@@ -1939,6 +1994,11 @@ final class CodexMenuBarApp: NSObject, NSApplicationDelegate {
     }
 
     private func scheduleAnimationTimerIfNeeded() {
+        guard !isSystemSleeping else {
+            animationTimer?.invalidate()
+            animationTimer = nil
+            return
+        }
         if shouldAnimateMenuBarIcon() {
             if animationTimer == nil {
                 let timer = Timer.scheduledTimer(
@@ -1958,6 +2018,8 @@ final class CodexMenuBarApp: NSObject, NSApplicationDelegate {
     }
 
     func applicationWillTerminate(_ notification: Notification) {
+        antigravityLimitReader.setSuspended(true)
+        cursorLimitReader.setSuspended(true)
         updateCheckTimer?.invalidate()
         NSWorkspace.shared.notificationCenter.removeObserver(self)
         releaseSingleInstanceLock()
@@ -1965,6 +2027,26 @@ final class CodexMenuBarApp: NSObject, NSApplicationDelegate {
 
     @objc private func timerFired(_ timer: Timer) {
         refresh()
+    }
+
+    @objc private func systemWillSleep(_ notification: Notification) {
+        isSystemSleeping = true
+        timer?.invalidate()
+        animationTimer?.invalidate()
+        animationTimer = nil
+        antigravityLimitReader.setSuspended(true)
+        cursorLimitReader.setSuspended(true)
+    }
+
+    @objc private func systemDidWake(_ notification: Notification) {
+        isSystemSleeping = false
+        antigravityLimitReader.setSuspended(false)
+        cursorLimitReader.setSuspended(false)
+        lastAntigravityLimitRefresh = .distantPast
+        lastCursorLimitRefresh = .distantPast
+        scheduleTimer()
+        refresh()
+        scheduleAnimationTimerIfNeeded()
     }
 
     @objc private func animationTimerFired(_ timer: Timer) {
@@ -1994,29 +2076,6 @@ final class CodexMenuBarApp: NSObject, NSApplicationDelegate {
         }
     }
 
-    // Menu item index constants
-    // 0:  header "Codex Menu Bar"
-    // 1:  separator
-    // 2:  summary card
-    // 3:  "Codex Status: -"
-    // 4:  "Detail: -"
-    // 5:  "Source: -"
-    // 6:  "Last Activity: -"
-    // 7:  "Updated: -"
-    // 8:  separator
-    // 9:  "5-hour limit: -"
-    // 10: "Weekly limit: -"
-    // 11: "Limit source: -"
-    // 12: separator
-    // 13: "AGY: -" (header)
-    // 14: "AGY Activity: -"
-    // 15: "AGY Conversations: -"
-    // 16: separator
-    // 17: Settings...
-    // 18: Open Status File
-    // 19: Reveal Status Folder
-    // 20: Restart
-    // 21: Quit
     private func configureMenu() {
         let menu = NSMenu()
         menu.autoenablesItems = false
@@ -2043,32 +2102,36 @@ final class CodexMenuBarApp: NSObject, NSApplicationDelegate {
         menu.addItem(NSMenuItem(title: "5-hour limit: -", action: nil, keyEquivalent: ""))         // 11
         menu.addItem(NSMenuItem(title: "Weekly limit: -", action: nil, keyEquivalent: ""))         // 12
         menu.addItem(NSMenuItem(title: "Limit source: -", action: nil, keyEquivalent: ""))         // 13
-        menu.addItem(NSMenuItem.separator())                                                         // 14
-        menu.addItem(NSMenuItem(title: "AGY: -", action: nil, keyEquivalent: ""))                  // 15
-        menu.addItem(NSMenuItem(title: "AGY Activity: -", action: nil, keyEquivalent: ""))         // 16
-        menu.addItem(NSMenuItem(title: "AGY Conversations: -", action: nil, keyEquivalent: ""))    // 17
-        menu.addItem(NSMenuItem.separator())                                                         // 18
+        resetCreditsMenuItem.isHidden = true
+        menu.addItem(resetCreditsMenuItem)                                                          // 14
+        menu.addItem(NSMenuItem.separator())                                                         // 15
+        menu.addItem(NSMenuItem(title: "AGY: -", action: nil, keyEquivalent: ""))                  // 16
+        menu.addItem(NSMenuItem(title: "AGY Activity: -", action: nil, keyEquivalent: ""))         // 17
+        menu.addItem(NSMenuItem(title: "AGY Conversations: -", action: nil, keyEquivalent: ""))    // 18
+        menu.addItem(NSMenuItem.separator())                                                         // 19
         
-        menu.addItem(NSMenuItem(title: "Cursor: -", action: nil, keyEquivalent: ""))               // 19
-        menu.addItem(NSMenuItem(title: "Cursor Activity: -", action: nil, keyEquivalent: ""))      // 20
-        menu.addItem(NSMenuItem(title: "Cursor Quota: -", action: nil, keyEquivalent: ""))         // 21
-        menu.addItem(NSMenuItem.separator())                                                         // 22
+        menu.addItem(NSMenuItem(title: "Cursor: -", action: nil, keyEquivalent: ""))               // 20
+        menu.addItem(NSMenuItem(title: "Cursor Activity: -", action: nil, keyEquivalent: ""))      // 21
+        menu.addItem(NSMenuItem(title: "Cursor Quota: -", action: nil, keyEquivalent: ""))         // 22
+        menu.addItem(NSMenuItem.separator())                                                         // 23
         
-        menu.addItem(NSMenuItem(title: "GitHub Repository...", action: #selector(openGitHub), keyEquivalent: "")) // 23
-        menu.addItem(NSMenuItem(title: "Settings...", action: #selector(openSettings), keyEquivalent: ","))         // 24
-        menu.addItem(NSMenuItem(title: "Open Status File", action: #selector(openStatusFile), keyEquivalent: "o")) // 25
-        menu.addItem(NSMenuItem(title: "Reveal Status Folder", action: #selector(revealStatusFolder), keyEquivalent: "r")) // 26
-        menu.addItem(NSMenuItem.separator())                                                         // 27
-        menu.addItem(NSMenuItem(title: "Restart", action: #selector(restart), keyEquivalent: "R")) // 28
-        menu.addItem(NSMenuItem(title: "Quit", action: #selector(quit), keyEquivalent: "q"))       // 29
+        menu.addItem(NSMenuItem(title: "GitHub Repository...", action: #selector(openGitHub), keyEquivalent: "")) // 24
+        menu.addItem(NSMenuItem(title: "Settings...", action: #selector(openSettings), keyEquivalent: ","))         // 25
+        menu.addItem(NSMenuItem(title: "Open Status File", action: #selector(openStatusFile), keyEquivalent: "o")) // 26
+        menu.addItem(NSMenuItem(title: "Reveal Status Folder", action: #selector(revealStatusFolder), keyEquivalent: "r")) // 27
+        menu.addItem(NSMenuItem.separator())                                                         // 28
+        menu.addItem(NSMenuItem(title: "Restart", action: #selector(restart), keyEquivalent: "R")) // 29
+        menu.addItem(NSMenuItem(title: "Quit", action: #selector(quit), keyEquivalent: "q"))       // 30
         statusItem.menu = menu
     }
 
     private func refresh() {
+        guard !isSystemSleeping else { return }
         manualPayload = readPayload()
         currentPayload = resolvePayload(manualPayload)
         refreshLimitStateIfNeeded()
         refreshAntigravitySnapshot()
+        refreshAntigravityLimitStateIfNeeded()
         refreshCursorSnapshot()
         refreshRuntimeSignalSnapshot()
         refreshCursorLimitStateIfNeeded()
@@ -2178,15 +2241,32 @@ final class CodexMenuBarApp: NSObject, NSApplicationDelegate {
         }
     }
 
+    private func refreshAntigravityLimitStateIfNeeded() {
+        guard !isSystemSleeping, settings.antigravityWatchEnabled,
+              Date().timeIntervalSince(lastAntigravityLimitRefresh) >= 300,
+              !isRefreshingAntigravityLimits else { return }
+        isRefreshingAntigravityLimits = true
+        lastAntigravityLimitRefresh = Date()
+        let reader = antigravityLimitReader
+        DispatchQueue.global(qos: .utility).async { [reader, weak self] in
+            let state = reader.readLatest()
+            Task { @MainActor [weak self] in
+                guard let self else { return }
+                if let state {
+                    self.currentAntigravityLimitState = state
+                } else {
+                    self.currentAntigravityLimitState.isStale = true
+                }
+                self.isRefreshingAntigravityLimits = false
+                self.updateMenu()
+            }
+        }
+    }
+
     private func refreshCursorLimitStateIfNeeded(force: Bool = false) {
         let now = Date()
-        let isCursorAppRunning = NSRunningApplication.runningApplications(withBundleIdentifier: "com.todesktop.230313mzl4w4u92").first != nil
-        let wasRecentlyActive = latestCursorActivity.map { now.timeIntervalSince($0) <= 300.0 } == true
-        
-        guard isCursorAppRunning || wasRecentlyActive else {
-            return
-        }
-        
+        guard !isSystemSleeping, settings.cursorWatchEnabled else { return }
+
         guard force || now.timeIntervalSince(lastCursorLimitRefresh) >= cursorLimitRefreshInterval else {
             return
         }
@@ -2199,10 +2279,14 @@ final class CodexMenuBarApp: NSObject, NSApplicationDelegate {
         let reader = cursorLimitReader
 
         DispatchQueue.global(qos: .utility).async { [reader] in
-            let state = reader.readLiveUsage() ?? .empty
+            let state = reader.readLiveUsage()
             Task { @MainActor [weak self] in
                 guard let self else { return }
-                self.currentCursorLimitState = state
+                if let state {
+                    self.currentCursorLimitState = state
+                } else {
+                    self.currentCursorLimitState.isStale = true
+                }
                 self.isRefreshingCursorLimits = false
                 self.updateMenuBarIcon()
                 self.updateMenu()
@@ -2690,6 +2774,7 @@ final class CodexMenuBarApp: NSObject, NSApplicationDelegate {
 
         usageSummaryView.updateAntigravity(
             snapshot: currentAntigravitySnapshot,
+            limitState: currentAntigravityLimitState,
             activeWindowSeconds: settings.activeWindowSeconds,
             now: now
         )
@@ -2710,12 +2795,16 @@ final class CodexMenuBarApp: NSObject, NSApplicationDelegate {
         menu.item(at: 12)?.title = "Weekly limit: \(limitDetailText(currentLimitState.secondary, fallback: settings.weeklyLimitText))"
         menu.item(at: 13)?.title = "Limit source: \(currentLimitState.source)"
 
+        let resetCreditsCount = currentLimitState.resetCreditsAvailableCount ?? 0
+        resetCreditsMenuItem.title = "Reset credits: \(resetCreditsCount)"
+        resetCreditsMenuItem.isHidden = resetCreditsCount <= 0
+
         // AGY section visibility and update
         let showAGY = settings.antigravityWatchEnabled
-        menu.item(at: 14)?.isHidden = !showAGY
         menu.item(at: 15)?.isHidden = !showAGY
         menu.item(at: 16)?.isHidden = !showAGY
         menu.item(at: 17)?.isHidden = !showAGY
+        menu.item(at: 18)?.isHidden = !showAGY
 
         if showAGY {
             let agStatusText: String
@@ -2743,10 +2832,10 @@ final class CodexMenuBarApp: NSObject, NSApplicationDelegate {
             } else {
                 agStatusText = "Idle"
             }
-            menu.item(at: 15)?.title = "AGY: \(agStatusText)"
+            menu.item(at: 16)?.title = "AGY: \(agStatusText)"
             
             if let detail = agPayload?.detail, !detail.isEmpty, normalizedAgStatus != "idle" {
-                menu.item(at: 16)?.title = "AGY Detail: \(detail)"
+                menu.item(at: 17)?.title = "AGY Detail: \(detail)"
             } else {
                 let agActivityText: String
                 if let lastDate = currentAntigravitySnapshot.lastActivityDate {
@@ -2755,21 +2844,21 @@ final class CodexMenuBarApp: NSObject, NSApplicationDelegate {
                 } else {
                     agActivityText = "-"
                 }
-                menu.item(at: 16)?.title = "AGY Activity: \(agActivityText) ago"
+                menu.item(at: 17)?.title = "AGY Activity: \(agActivityText) ago"
             }
-            menu.item(at: 17)?.title = "AGY Conversations: \(currentAntigravitySnapshot.totalConversationCount) total"
+            menu.item(at: 18)?.title = "AGY Conversations: \(currentAntigravitySnapshot.totalConversationCount) total"
         }
 
         // Cursor section visibility and update
         let showCursor = settings.cursorWatchEnabled
-        menu.item(at: 18)?.isHidden = !showCursor
         menu.item(at: 19)?.isHidden = !showCursor
         menu.item(at: 20)?.isHidden = !showCursor
         menu.item(at: 21)?.isHidden = !showCursor
+        menu.item(at: 22)?.isHidden = !showCursor
 
         if showCursor {
             let cursorStatusText = cursorActive ? "● Running" : "○ Idle"
-            menu.item(at: 19)?.title = "Cursor: \(cursorStatusText)"
+            menu.item(at: 20)?.title = "Cursor: \(cursorStatusText)"
             
             let cursorActivityText: String
             if let lastDate = latestCursorActivity {
@@ -2778,22 +2867,17 @@ final class CodexMenuBarApp: NSObject, NSApplicationDelegate {
             } else {
                 cursorActivityText = "-"
             }
-            menu.item(at: 20)?.title = "Cursor Activity: \(cursorActivityText)"
+            menu.item(at: 21)?.title = "Cursor Activity: \(cursorActivityText)"
             
             let quotaText: String
             if currentCursorLimitState.source == "live" {
-                let apiUsed = currentCursorLimitState.apiPercentUsed.map { String(format: "%.1f%%", $0) } ?? "-"
-                let totalUsed = currentCursorLimitState.totalPercentUsed.map { String(format: "%.1f%%", $0) } ?? "-"
-                let spend = currentCursorLimitState.totalSpendUSD.map { String(format: "$%.2f", $0) } ?? "-"
-                let limit = currentCursorLimitState.limitUSD.map { String(format: "$%.2f", $0) } ?? "-"
-                let tokens = currentCursorLimitState.totalTokens.map { formatTokenCount($0) } ?? "-"
-                let requests = currentCursorLimitState.totalRequests.map { "\($0) reqs" } ?? "-"
-                
-                quotaText = "\(apiUsed) API (\(totalUsed) total) | \(spend)/\(limit) | \(tokens) (\(requests))"
+                let totalUsed = currentCursorLimitState.totalPercentUsed.map { String(format: "%.1f%% used", $0) } ?? "-"
+                let reset = currentCursorLimitState.billingCycleEnd.map { " | resets \(quotaDateText($0))" } ?? ""
+                quotaText = "\(totalUsed) | \(cursorIncludedUsageText(currentCursorLimitState))\(reset)" + (currentCursorLimitState.isStale ? " (cached)" : "")
             } else {
                 quotaText = "No quota data"
             }
-            menu.item(at: 21)?.title = "Cursor Quota: \(quotaText)"
+            menu.item(at: 22)?.title = "Cursor Quota: \(quotaText)"
         }
     }
 

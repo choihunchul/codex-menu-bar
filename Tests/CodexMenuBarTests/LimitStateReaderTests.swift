@@ -5,6 +5,24 @@ import Testing
 
 @Suite("Codex limit reader tests")
 struct LimitStateReaderTests {
+    @Test("Reads owned reset credits independently of currently applicable credits")
+    func resetCreditsCount() throws {
+        let data = Data(#"{"rate_limit_reset_credits":{"available_count":2,"applicable_available_count":0}}"#.utf8)
+        let state = try #require(LimitStateReader.decodeLiveUsageState(from: data))
+        #expect(state.resetCreditsAvailableCount == 2)
+    }
+
+    @Test("Handles zero, missing, and null reset credits")
+    func unavailableResetCredits() throws {
+        for json in [#"{}"#, #"{"rate_limit_reset_credits":null}"#] {
+            let state = try #require(LimitStateReader.decodeLiveUsageState(from: Data(json.utf8)))
+            #expect(state.resetCreditsAvailableCount == nil)
+        }
+        let data = Data(#"{"rate_limit_reset_credits":{"available_count":0}}"#.utf8)
+        let state = try #require(LimitStateReader.decodeLiveUsageState(from: data))
+        #expect(state.resetCreditsAvailableCount == 0)
+    }
+
     @Test("Runtime signal reader bootstraps a bounded tail then reads only appended rows")
     func runtimeSignalReaderIsIncremental() throws {
         let codexHome = FileManager.default.temporaryDirectory

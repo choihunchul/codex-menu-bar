@@ -106,6 +106,10 @@ Open the menu bar item and choose `Settings...` to change:
 
 Settings are saved to `~/.codex-menu-bar/settings.json` and apply immediately.
 The weekly and 5-hour limit fields are shown below the status separator in the menu.
+When live usage reports available reset credits, the menu also shows `Reset credits: N`. The row is hidden when the count is zero or unavailable.
+The AGY tab reads Gemini and Claude/GPT weekly and five-hour quotas, including reset times, using the signed-in `agy` CLI's `/usage` command. Install Antigravity CLI and sign in once to enable these readings.
+The Cursor tab separates included usage, bonus usage, and on-demand spend, and shows the billing cycle reset time. It can read usage even when the editor is closed.
+Cursor and Antigravity quotas refresh every five minutes while the Mac is awake. On system sleep, their running requests are cancelled and polling pauses; it resumes after wake. The app does not request a sleep-prevention assertion or schedule a system wake. Failed refreshes retain the last reading with a `cached` label.
 When available, the app automatically reads live Codex usage and colors the menu bar title: `C` reflects the 5-hour limit and `X` reflects the weekly limit.
 Green means plenty remains, orange means getting low, and red means close to exhausted.
 If live usage is unavailable, it falls back to the newest local `codex.rate_limits` event in `~/.codex/logs_2.sqlite`.
