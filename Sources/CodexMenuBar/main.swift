@@ -1031,12 +1031,14 @@ private final class UsageSummaryCardView: NSView {
         fiveHourLimitView.update(
             title: "5h limit",
             bucket: fiveHourLimit,
-            tokenText: codexLimitUsageText(fiveHourTokens, bucket: fiveHourLimit)
+            tokenText: formatTokenCount(fiveHourTokens),
+            resetText: codexLimitResetText(fiveHourLimit)
         )
         weeklyLimitView.update(
             title: "Weekly limit",
             bucket: weeklyLimit,
-            tokenText: codexLimitUsageText(weeklyTokens, bucket: weeklyLimit)
+            tokenText: formatTokenCount(weeklyTokens),
+            resetText: codexLimitResetText(weeklyLimit)
         )
         updateAdditionalLimitViews(additionalLimits)
         needsLayout = true
@@ -1056,7 +1058,7 @@ private final class UsageSummaryCardView: NSView {
             view.update(title: limit.name, bucket: limit.bucket, tokenText: nil)
         }
 
-        let targetHeight = max(268 + CGFloat(limits.count * 28), agLimitViews.isEmpty ? 268 : 150 + CGFloat(agLimitViews.count * 44))
+        let targetHeight = max(296 + CGFloat(limits.count * 28), agLimitViews.isEmpty ? 296 : 150 + CGFloat(agLimitViews.count * 44))
         if frame.height != targetHeight {
             setFrameSize(NSSize(width: frame.width, height: targetHeight))
         }
@@ -1267,9 +1269,10 @@ private final class UsageSummaryCardView: NSView {
         leftTop -= 20
         graphView.frame = NSRect(x: leftX, y: leftTop - 24, width: leftWidth, height: 24)
         leftTop -= 36
-        fiveHourLimitView.frame = NSRect(x: leftX, y: leftTop - 22, width: leftWidth, height: 22)
-        leftTop -= 28
-        weeklyLimitView.frame = NSRect(x: leftX, y: leftTop - 22, width: leftWidth, height: 22)
+        fiveHourLimitView.frame = NSRect(x: leftX, y: leftTop - 36, width: leftWidth, height: 36)
+        leftTop -= 42
+        weeklyLimitView.frame = NSRect(x: leftX, y: leftTop - 36, width: leftWidth, height: 36)
+        leftTop -= 42
         for view in additionalLimitViews {
             leftTop -= 28
             view.frame = NSRect(x: leftX, y: leftTop - 22, width: leftWidth, height: 22)
@@ -1410,6 +1413,7 @@ private final class UsageMetricBlockView: NSView {
 
 private final class LimitUsageBarView: NSView {
     private let titleLabel = NSTextField(labelWithString: "")
+    private let detailLabel = NSTextField(labelWithString: "")
     private var usedPercent: Double?
     private var fillColor = NSColor.systemGreen
 
@@ -1427,15 +1431,24 @@ private final class LimitUsageBarView: NSView {
         titleLabel.isBordered = false
         titleLabel.drawsBackground = false
         addSubview(titleLabel)
+        detailLabel.font = .systemFont(ofSize: 10, weight: .regular)
+        detailLabel.textColor = .secondaryLabelColor
+        detailLabel.lineBreakMode = .byClipping
+        detailLabel.maximumNumberOfLines = 1
+        detailLabel.isEditable = false
+        detailLabel.isBordered = false
+        detailLabel.drawsBackground = false
+        addSubview(detailLabel)
     }
 
     required init?(coder: NSCoder) {
         fatalError("init(coder:) has not been implemented")
     }
 
-    func update(title: String, bucket: LimitBucket?, tokenText: String?) {
+    func update(title: String, bucket: LimitBucket?, tokenText: String?, resetText: String? = nil) {
         guard let bucket else {
             titleLabel.stringValue = "\(title): -"
+            detailLabel.stringValue = ""
             usedPercent = nil
             needsDisplay = true
             return
@@ -1444,9 +1457,14 @@ private final class LimitUsageBarView: NSView {
         let used = min(max(bucket.usedPercent, 0), 100)
         usedPercent = used
         fillColor = colorForRemaining(bucket.remainingPercent)
-        if let tokenText, !tokenText.isEmpty {
+        if let resetText {
+            titleLabel.stringValue = "\(title): \(Int(round(bucket.remainingPercent)))% left, \(Int(round(used)))% used"
+            detailLabel.stringValue = [tokenText, "resets \(resetText)"].compactMap { $0 }.filter { !$0.isEmpty }.joined(separator: " · ")
+        } else if let tokenText, !tokenText.isEmpty {
+            detailLabel.stringValue = ""
             titleLabel.stringValue = "\(title): \(Int(round(bucket.remainingPercent)))% left, \(Int(round(used)))% used • \(tokenText)"
         } else {
+            detailLabel.stringValue = ""
             titleLabel.stringValue = "\(title): \(Int(round(bucket.remainingPercent)))% left, \(Int(round(used)))% used"
         }
         needsLayout = true
@@ -1456,6 +1474,7 @@ private final class LimitUsageBarView: NSView {
     /// LimitBucket 없이 직접 percent 값과 색상으로 바를 업데이트합니다 (AGY 활동 바용).
     func updateRaw(title: String, usedPercent: Double, color: NSColor) {
         titleLabel.stringValue = title
+        detailLabel.stringValue = ""
         self.usedPercent = min(max(usedPercent, 0), 100)
         fillColor = color
         needsLayout = true
@@ -1464,7 +1483,13 @@ private final class LimitUsageBarView: NSView {
 
     override func layout() {
         super.layout()
-        titleLabel.frame = NSRect(x: 0, y: bounds.height - 13, width: bounds.width, height: 13)
+        if !detailLabel.stringValue.isEmpty {
+            titleLabel.frame = NSRect(x: 0, y: bounds.height - 13, width: bounds.width, height: 13)
+            detailLabel.frame = NSRect(x: 0, y: 0, width: bounds.width, height: 12)
+        } else {
+            titleLabel.frame = NSRect(x: 0, y: bounds.height - 13, width: bounds.width, height: 13)
+            detailLabel.frame = .zero
+        }
     }
 
     override func draw(_ dirtyRect: NSRect) {
@@ -1473,7 +1498,7 @@ private final class LimitUsageBarView: NSView {
             return
         }
 
-        let trackRect = CGRect(x: 0, y: 1, width: bounds.width, height: 6)
+        let trackRect = CGRect(x: 0, y: detailLabel.stringValue.isEmpty ? 1 : 14, width: bounds.width, height: 6)
         context.setFillColor(NSColor.separatorColor.withAlphaComponent(0.35).cgColor)
         context.addPath(CGPath(roundedRect: trackRect, cornerWidth: 3, cornerHeight: 3, transform: nil))
         context.fillPath()

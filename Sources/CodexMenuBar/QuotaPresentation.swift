@@ -24,9 +24,7 @@ func quotaResetText(_ date: Date, now: Date = Date()) -> String {
     return "\(quotaDateText(date)) (\(remaining))"
 }
 
-func codexLimitUsageText(_ tokens: Int, bucket: LimitBucket?, now: Date = Date()) -> String {
-    let usage = formatTokenCount(tokens)
-    guard let timestamp = bucket?.resetAt else { return usage }
-    let reset = Date(timeIntervalSince1970: timestamp)
-    return "\(usage) · resets \(quotaResetText(reset, now: now))"
+func codexLimitResetText(_ bucket: LimitBucket?, now: Date = Date()) -> String? {
+    guard let timestamp = bucket?.resetAt else { return nil }
+    return quotaResetText(Date(timeIntervalSince1970: timestamp), now: now)
 }
